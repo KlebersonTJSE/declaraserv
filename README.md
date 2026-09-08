@@ -1,24 +1,16 @@
----
-title: "DeclaraServ"
-output: github_document
----
-
-# 📄 DeclaraServ
+<p align="center">
+  <img src="img/declaraserv_logo_horizontal.png" width="500r">
+</p>
 
 ### Emissão digital de declarações funcionais com segurança, agilidade e autonomia.
 
-[![License: MIT](https://img.shields.io/badgen.svg](LICENSE)
-[![R](https://img.shields.io/badge/R-%3E%3D4.3-blue)://www.r-project.org/)
-[![Shiny](https://img.shields.io/badge%20App-lightblue](https://shiny.posit.co/)
-[![Status](https://img.shields.io/badge/Statusvolvimento-yellow]()
-[![GitHub last commit](https://img.shields.io/github/last-commit/SEU-USUARIO/DeclaraServ)](https://githubServ)
 
-<br>
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSEg.shields.io/badge/R-%.3-blue](https://www.r-project.org/)
 
-<p align="center">
-  <img src="img/logo_declaraserv.png" width="250r">
-<b>Sistema de Emissão de Declarações Funcionais para Servidores Públicos</b>
-</p>
+[![Shiny](https://img.shields.io/badge/Shiny-Web%20App-lightblue)](https://shiny.[![Status](https://img.shields.io/badge/Status-Emvimento-yellow]()
+
+[![Last Commit](https://img.shields.io/github/last-commit/KlebersonTJSE/declaraserv)](https://github.com/KlebersonTJSE/Fp align="center">
+
 
 ---
 
