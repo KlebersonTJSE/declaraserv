@@ -1,0 +1,606 @@
+---
+title: ""
+output: 
+  html_document:
+    self_contained: true
+params:
+  matricula: "12345"
+  numero_certidao: "0000/2026"
+  unidade_administrativa: "DIRETORIA DE GESTÃO DE PESSOAS"
+  numero_processo: ""
+  codigo_validacao: ""
+  logo_path: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# =========================================================================
+# .Renviron — carregamento explícito
+# -------------------------------------------------------------------------
+# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R), as
+# variáveis de ambiente já carregadas pelo app.R estão disponíveis aqui.
+# Mas para permitir renderizar/testar este .Rmd isoladamente (fora do
+# Shiny), carregamos o .Renviron da pasta do projeto explicitamente também.
+# =========================================================================
+renviron_path <- file.path(getwd(), ".Renviron")
+
+if (file.exists(renviron_path)) {
+  readRenviron(renviron_path)
+}
+
+# Lê uma variável de ambiente obrigatória; interrompe a renderização com
+# mensagem clara caso ela não esteja definida no .Renviron.
+obter_env_obrigatoria <- function(nome_var) {
+  valor <- Sys.getenv(nome_var, unset = "")
+
+  if (valor == "") {
+    stop(
+      "Variável de ambiente obrigatória não definida: ", nome_var,
+      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
+    )
+  }
+
+  valor
+}
+
+# =========================================================================
+# PACOTES
+# =========================================================================
+library(DBI)
+library(rJava)
+library(RJDBC)
+library(glue)
+library(stringr)
+library(base64enc)
+library(htmltools)
+
+# =========================================================================
+# CONEXÃO COM O IRIS
+# -------------------------------------------------------------------------
+# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
+# .Renviron — sem valores padrão hardcoded no código.
+# =========================================================================
+Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+
+driver_class <- Sys.getenv(
+  "MPRO_IRIS_DRIVER_CLASS",
+  unset = "com.intersystems.jdbc.IRISDriver"
+)
+
+jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
+url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
+iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
+iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
+
+if (!file.exists(jar_path)) {
+  stop(
+    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
+    ". Verifique o caminho configurado no .Renviron para este ",
+    "servidor/ambiente."
+  )
+}
+
+drv <- JDBC(
+  driverClass = driver_class,
+  classPath = jar_path
+)
+
+con <- dbConnect(
+  drv,
+  url,
+  user = iris_user,
+  password = iris_pass
+)
+
+# =========================================================================
+# CONSULTA 1 — Dados funcionais do servidor (RHCADSERVIDOR)
+# =========================================================================
+matricula_sql <- as.integer(params$matricula)
+
+if (is.na(matricula_sql)) {
+  stop("Por favor, informe uma matrícula válida no parâmetro 'matricula'.")
+}
+
+query_servidor <- glue("
+SELECT
+    Nome AS NOME,
+    Pessoa->CpfFormatado AS CPF,
+    Matricula AS MATRICULA,
+    Funcional->CargoEfetivo->Descricao AS CARGO,
+    Funcional->Classe AS CLASSENIVEL,
+    Funcional->RegimeJuridico->Descricao AS REGIMEJUR,
+    CASE
+        WHEN Funcional->CargoEfetivo IS NOT NULL THEN 'CONCURSO'
+        WHEN Funcional->CargoFuncao IS NOT NULL THEN 'NOMEAÇÃO'
+        ELSE 'CONTRATAÇÃO OU OUTRA'
+    END AS FORMAINGRESSO,
+    Funcional->DataIngOrgaoFormatada AS DATAINGRESSO,
+    Financeiro->DataDesligamento AS DATAFIM,
+    Funcional->DataIngCargoEfetivoFormatada AS DATAINICIOEXERCICIO,
+    Funcional->TipoServidor->Descricao AS SITUACAO,
+    Funcional->LotacaoOrigem->Descricao AS LOTACAO,
+    Funcional->LotacaoExercicio->Descricao AS LOTACAOEXERCICIO
+FROM
+    RHCADSERVIDOR
+WHERE
+    Matricula = {matricula_sql}
+")
+
+dados <- dbGetQuery(con, query_servidor)
+
+if (nrow(dados) == 0) {
+  dbDisconnect(con)
+  stop(
+    glue(
+      "Nenhum registro encontrado em RHCADSERVIDOR para a matrícula {matricula_sql}."
+    )
+  )
+}
+
+dados <- dados[1, ]
+
+# =========================================================================
+# CONSULTA 2 — Histórico de cargos/funções comissionadas
+#              (RHCadFuncaoComissionada)
+# =========================================================================
+query_funcoes <- glue("
+SELECT
+    DtPosseFormatada AS DATAINICIO,
+    DtExoneracaoFormatada AS DATAFIM,
+    CargoFuncao->Descricao AS CARGOFUNCAO,
+    DocNomeacaoDesignacao_Tipo->Descricao || ' - '
+    || DocNomeacaoDesignacao_PublicacaoNumero AS ATOADMIN
+FROM
+    RHCadFuncaoComissionada
+WHERE
+    Servidor->Matricula = {matricula_sql}
+ORDER BY
+    DtPosseFormatada
+")
+
+historico <- tryCatch(
+  dbGetQuery(con, query_funcoes),
+  error = function(e) {
+    warning("Falha ao consultar RHCadFuncaoComissionada: ", conditionMessage(e))
+    data.frame(
+      DATAINICIO = character(0), DATAFIM = character(0),
+      CARGOFUNCAO = character(0), ATOADMIN = character(0),
+      stringsAsFactors = FALSE
+    )
+  }
+)
+
+# =========================================================================
+# CONSULTA 3 — Dados do gestor da lotação DGP (RHTabLotacao)
+# =========================================================================
+query_gestor <- "
+SELECT
+    Gestor->Nome AS GESTOR_NOME,
+    Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Gestor->Matricula AS GESTOR_MATRICULA,
+    Email AS EMAIL,
+    TelefonePrincipal AS TELEFONE
+FROM
+    RHTabLotacao
+WHERE
+    Sigla = 'DGP'
+"
+
+dados_gestor <- tryCatch(
+  dbGetQuery(con, query_gestor),
+  error = function(e) {
+    warning("Falha ao consultar RHTabLotacao: ", conditionMessage(e))
+    data.frame(
+      GESTOR_NOME = NA, GESTOR_CARGO = NA, GESTOR_MATRICULA = NA,
+      EMAIL = NA, TELEFONE = NA,
+      stringsAsFactors = FALSE
+    )
+  }
+)
+
+# Usa apenas o primeiro registro retornado
+if (nrow(dados_gestor) > 0) {
+  dados_gestor <- dados_gestor[1, ]
+}
+
+dbDisconnect(con)
+
+# =========================================================================
+# FUNÇÕES DE FORMATAÇÃO
+# =========================================================================
+meses_pt <- c(
+  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+)
+
+parse_data <- function(x) {
+  if (length(x) == 0) return(as.Date(NA))
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x) || trimws(as.character(x)) == "") {
+    return(as.Date(NA))
+  }
+  if (inherits(x, "Date")) return(as.Date(x))
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+
+  x <- trimws(as.character(x))
+  formatos <- c("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y")
+
+  for (fmt in formatos) {
+    resultado <- suppressWarnings(as.Date(x, format = fmt))
+    if (!is.na(resultado)) return(resultado)
+  }
+
+  resultado <- suppressWarnings(as.Date(x))
+  if (!is.na(resultado)) return(resultado)
+
+  stop("Não foi possível interpretar a data: ", x)
+}
+
+formatar_data_curta <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  format(d, "%d/%m/%Y")
+}
+
+formatar_data_extenso <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  glue("{format(d, '%d')} de {meses_pt[as.integer(format(d, '%m'))]} de {format(d, '%Y')}")
+}
+
+clean_html <- function(x) {
+  if (length(x) == 0) return("")
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x)) return("")
+  as.character(x)
+}
+
+# Calcula dias trabalhados num período; se não houver data de fim,
+# considera até a data atual (função em curso).
+calcular_dias <- function(data_inicio, data_fim) {
+  d_ini <- parse_data(data_inicio)
+  d_fim <- if (length(data_fim) == 0 || is.na(data_fim) || trimws(as.character(data_fim)) == "") {
+    Sys.Date()
+  } else {
+    parse_data(data_fim)
+  }
+
+  if (is.na(d_ini) || is.na(d_fim)) return(NA_integer_)
+
+  as.integer(d_fim - d_ini) + 1L
+}
+
+# =========================================================================
+# CAMPOS — Dados funcionais principais
+# =========================================================================
+nome        <- clean_html(str_to_upper(as.character(dados$NOME)))
+cpf         <- clean_html(dados$CPF)
+matricula   <- clean_html(dados$MATRICULA)
+cargo       <- clean_html(dados$CARGO)
+classenivel <- clean_html(dados$CLASSENIVEL)
+regimejur   <- clean_html(dados$REGIMEJUR)
+formaingresso <- clean_html(dados$FORMAINGRESSO)
+dataingresso  <- formatar_data_curta(dados$DATAINGRESSO)
+datafim       <- formatar_data_curta(dados$DATAFIM)
+datainicioexercicio <- formatar_data_curta(dados$DATAINICIOEXERCICIO)
+situacao      <- clean_html(dados$SITUACAO)
+lotacao       <- clean_html(dados$LOTACAO)
+lotacaoexercicio <- clean_html(dados$LOTACAOEXERCICIO)
+
+    # =====================================================================
+    # Dados do Gestor do Servidor
+    # =====================================================================
+    # gestor    <- clean_html(dados$GESTOR_NOME)
+    # cargogestor     <- clean_html(dados$GESTOR_CARGO)
+    # matriculagestor <- clean_html(dados$GESTOR_MATRICULA)
+
+gestor        <- clean_html(dados_gestor$GESTOR_NOME)
+cargogestor   <- clean_html(dados_gestor$GESTOR_CARGO)
+matriculagestor <- clean_html(dados_gestor$GESTOR_MATRICULA)
+emailgestor   <- clean_html(dados_gestor$EMAIL)
+telefonegestor <- clean_html(dados_gestor$TELEFONE)
+
+numero_certidao <- clean_html(params$numero_certidao)
+unidade_administrativa <- clean_html(params$unidade_administrativa)
+numero_processo <- clean_html(params$numero_processo)
+codigo_validacao <- clean_html(params$codigo_validacao)
+datahoje <- formatar_data_extenso(Sys.Date())
+
+# Texto do período total do vínculo (para o histórico narrativo).
+periodo_vinculo_texto <- if (datafim == "") {
+  glue("permanecendo no vínculo até a presente data")
+} else {
+  glue("permanecendo no vínculo até {datafim}")
+}
+
+# =========================================================================
+# HISTÓRICO — Cargos/funções comissionadas
+# =========================================================================
+if (nrow(historico) > 0) {
+  historico$DATAINICIO_FMT <- vapply(historico$DATAINICIO, formatar_data_curta, character(1))
+  historico$DATAFIM_FMT    <- vapply(historico$DATAFIM, formatar_data_curta, character(1))
+  historico$DIAS <- mapply(calcular_dias, historico$DATAINICIO, historico$DATAFIM)
+  historico$CARGOFUNCAO <- vapply(historico$CARGOFUNCAO, clean_html, character(1))
+  historico$ATOADMIN    <- vapply(historico$ATOADMIN, clean_html, character(1))
+}
+
+# =========================================================================
+# LOGOTIPO
+# =========================================================================
+logo_path <- as.character(params$logo_path)
+if (is.na(logo_path) || logo_path == "") {
+  logo_path <- file.path(getwd(), "assets", "logo_mpro.png")
+}
+
+logo_base64 <- ""
+if (file.exists(logo_path)) {
+  logo_bytes <- readBin(logo_path, "raw", file.info(logo_path)$size)
+  logo_base64 <- paste0("data:image/png;base64,", base64enc::base64encode(logo_bytes))
+}
+```
+
+```{css, echo=FALSE}
+body {
+  font-family: "Georgia", "Times New Roman", serif;
+  color: #1a1a1a;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px;
+  line-height: 1.6;
+}
+
+.certidao-cabecalho {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.certidao-cabecalho img {
+  max-height: 90px;
+  margin-bottom: 12px;
+}
+
+.certidao-cabecalho h1 {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 4px 0;
+}
+
+.certidao-cabecalho h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #444;
+  margin: 2px 0;
+}
+
+.certidao-cabecalho h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  margin: 2px 0 24px 0;
+}
+
+.certidao-titulo {
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 24px 0;
+}
+
+.certidao-corpo {
+  text-align: justify;
+  font-size: 15px;
+  margin-bottom: 24px;
+}
+
+.certidao-corpo p {
+  margin-bottom: 16px;
+}
+
+.certidao-secao h4 {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 4px;
+  margin: 28px 0 12px 0;
+}
+
+.dados-funcionais {
+  list-style: none;
+  padding-left: 0;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.dados-funcionais li {
+  padding: 4px 0;
+  border-bottom: 1px dotted #ddd;
+}
+
+.dados-funcionais li strong {
+  display: inline-block;
+  min-width: 210px;
+}
+
+.tabela-historico {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 16px 0 24px 0;
+}
+
+.tabela-historico th,
+.tabela-historico td {
+  border: 1px solid #ccc;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.tabela-historico th {
+  background-color: #f2f2f2;
+  font-weight: 700;
+}
+
+.certidao-rodape {
+  margin-top: 40px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura {
+  margin-top: 64px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura .linha {
+  display: inline-block;
+  border-top: 1px solid #1a1a1a;
+  padding-top: 6px;
+  min-width: 320px;
+}
+
+.certidao-validacao {
+  margin-top: 32px;
+  font-size: 12px;
+  color: #555;
+  text-align: center;
+  line-height: 1.8;
+}
+```
+
+<div class="certidao-cabecalho">
+```{r logo-html, results='asis'}
+if (logo_base64 != "") {
+  cat(glue('<img src="{logo_base64}" alt="Logo MPRO" />'))
+}
+```
+<h1>Ministério Público do Estado de Rondônia</h1>
+<h2>Procuradoria-Geral de Justiça</h2>
+<h3>`r unidade_administrativa`</h3>
+</div>
+
+<div class="certidao-titulo">
+Certidão/Declaração de Vínculo Funcional nº `r numero_certidao`
+</div>
+
+<div class="certidao-corpo">
+
+<p>
+Certificamos, para os devidos fins, que <strong>`r nome`</strong>,
+inscrito(a) no CPF sob o nº <strong>`r cpf`</strong>, matrícula
+funcional nº <strong>`r matricula`</strong>, mantém/manteve vínculo
+funcional com o <strong>Ministério Público do Estado de Rondônia –
+MPRO</strong>, na condição de <strong>`r cargo`</strong>,
+submetido(a) ao regime jurídico <strong>`r regimejur`</strong>.
+</p>
+
+</div>
+
+<div class="certidao-secao">
+<h4>1. Dados funcionais</h4>
+<ul class="dados-funcionais">
+<li><strong>Nome:</strong> `r nome`</li>
+<li><strong>CPF:</strong> `r cpf`</li>
+<li><strong>Matrícula:</strong> `r matricula`</li>
+<li><strong>Cargo:</strong> `r cargo`</li>
+<li><strong>Classe/Nível/Padrão:</strong> `r classenivel`</li>
+<li><strong>Regime jurídico:</strong> `r regimejur`</li>
+<li><strong>Forma de ingresso:</strong> `r formaingresso`</li>
+<li><strong>Data de ingresso:</strong> `r dataingresso`</li>
+<li><strong>Data de início do exercício:</strong> `r datainicioexercicio`</li>
+<li><strong>Situação funcional:</strong> `r situacao`</li>
+<li><strong>Unidade de lotação:</strong> `r lotacao`</li>
+<li><strong>Local de exercício:</strong> `r lotacaoexercicio`</li>
+</ul>
+</div>
+
+<div class="certidao-secao">
+<h4>2. Histórico do vínculo</h4>
+
+<div class="certidao-corpo">
+<p>
+O(a) servidor(a) ingressou no Ministério Público do Estado de Rondônia
+em <strong>`r dataingresso`</strong>, para exercer o cargo de
+<strong>`r cargo`</strong>, `r periodo_vinculo_texto`.
+</p>
+</div>
+
+```{r tabela-historico, results='asis'}
+if (nrow(historico) > 0) {
+  cat('<p>Quando aplicável, registra-se que o(a) servidor(a) também exerceu as seguintes funções/cargos:</p>')
+  cat('<table class="tabela-historico">')
+  cat('<thead><tr><th>Período</th><th>Cargo/Função</th><th>Dias Trabalhados</th><th>Ato administrativo</th></tr></thead>')
+  cat('<tbody>')
+  for (i in seq_len(nrow(historico))) {
+    fim_txt <- if (historico$DATAFIM_FMT[i] == "") "em curso" else historico$DATAFIM_FMT[i]
+    periodo <- glue("{historico$DATAINICIO_FMT[i]} a {fim_txt}")
+    dias_txt <- if (is.na(historico$DIAS[i])) "" else format(historico$DIAS[i], big.mark = ".")
+    cat(glue(
+      "<tr><td>{periodo}</td><td>{historico$CARGOFUNCAO[i]}</td>",
+      "<td>{dias_txt}</td><td>{historico$ATOADMIN[i]}</td></tr>"
+    ))
+  }
+  cat('</tbody></table>')
+} else {
+  cat('<p>Não há registro de outras funções/cargos comissionados exercidos pelo(a) servidor(a).</p>')
+}
+```
+
+<div class="certidao-corpo">
+<p>
+A presente certidão é emitida com base nos registros constantes dos
+assentamentos funcionais e dos sistemas oficiais de gestão de pessoas
+do Ministério Público do Estado de Rondônia.
+</p>
+
+<p>
+Esta certidão é emitida a requerimento do(a) interessado(a), para
+fins de comprovação de vínculo funcional perante órgãos públicos,
+instituições privadas, instituições de ensino, concursos públicos,
+processos seletivos e demais finalidades legalmente admitidas.
+</p>
+</div>
+</div>
+
+<div class="certidao-rodape">
+<p>Porto Velho/RO, `r datahoje`.</p>
+</div>
+
+<div class="certidao-assinatura">
+<span class="linha">
+`r gestor`<br>`r cargogestor`<br>
+Ministério Público do Estado de Rondônia<br>
+Matrícula nº `r matriculagestor`<br>
+E-mail: `r emailgestor`<br>
+Telefone: `r telefonegestor`
+</span>
+</div>
+
+<p style="text-align:center; font-size:12px; margin-top:24px;">
+<strong>Documento assinado eletronicamente.</strong>
+</p>
+
+```{r validacao, results='asis'}
+linhas <- c()
+if (codigo_validacao != "") {
+  linhas <- c(linhas, glue("<strong>Código de validação:</strong> {codigo_validacao}"))
+}
+if (numero_processo != "") {
+  linhas <- c(linhas, glue("<strong>Processo/Requerimento nº:</strong> {numero_processo}"))
+}
+if (length(linhas) > 0) {
+  cat('<div class="certidao-validacao">')
+  cat(paste(linhas, collapse = "<br>"))
+  cat('</div>')
+}
+```
