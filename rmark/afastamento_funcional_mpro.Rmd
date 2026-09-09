@@ -438,7 +438,7 @@ Declaração de Afastamentos Funcionais nº `r numero_certidao`
 
 <p>
 Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF nº
-<strong>`r cpf`</strong>, matrícula funcional nº <strong>`r matricula`</strong>,
+<strong>`r cpf`</strong>, matrícula nº <strong>`r matricula`</strong>,
 ocupante do cargo de <strong>`r cargo`</strong>, possui registrados em
 seus assentamentos funcionais os seguintes períodos de
 afastamento/licença:
@@ -500,7 +500,7 @@ afastamento.
 </p>
 
 <p>
-É emitida a requerimento do(a) interessado(a), para fins de
+A presente declaração é emitida a requerimento do(a) interessado(a), para fins de
 comprovação perante órgãos públicos, instituições privadas,
 instituições de ensino, empregadores, entidades previdenciárias ou
 outras instituições que necessitem comprovar o período de

@@ -490,7 +490,7 @@ if (logo_base64 != "") {
 </div>
 
 <div class="certidao-titulo">
-Certidão/Declaração de Vínculo Funcional nº `r numero_certidao`
+Declaração de Vínculo Funcional nº `r numero_certidao`
 </div>
 
 <div class="certidao-corpo">
@@ -498,7 +498,7 @@ Certidão/Declaração de Vínculo Funcional nº `r numero_certidao`
 <p>
 Certificamos, para os devidos fins, que <strong>`r nome`</strong>,
 inscrito(a) no CPF sob o nº <strong>`r cpf`</strong>, matrícula
-funcional nº <strong>`r matricula`</strong>, mantém/manteve vínculo
+ nº <strong>`r matricula`</strong>, mantém vínculo
 funcional com o <strong>Ministério Público do Estado de Rondônia –
 MPRO</strong>, na condição de <strong>`r cargo`</strong>,
 submetido(a) ao regime jurídico <strong>`r regimejur`</strong>.
@@ -515,12 +515,10 @@ submetido(a) ao regime jurídico <strong>`r regimejur`</strong>.
 <li><strong>Cargo:</strong> `r cargo`</li>
 <li><strong>Classe/Nível/Padrão:</strong> `r classenivel`</li>
 <li><strong>Regime jurídico:</strong> `r regimejur`</li>
-<li><strong>Forma de ingresso:</strong> `r formaingresso`</li>
 <li><strong>Data de ingresso:</strong> `r dataingresso`</li>
 <li><strong>Data de início do exercício:</strong> `r datainicioexercicio`</li>
 <li><strong>Situação funcional:</strong> `r situacao`</li>
 <li><strong>Unidade de lotação:</strong> `r lotacao`</li>
-<li><strong>Local de exercício:</strong> `r lotacaoexercicio`</li>
 </ul>
 </div>
 
@@ -558,13 +556,13 @@ if (nrow(historico) > 0) {
 
 <div class="certidao-corpo">
 <p>
-A presente certidão é emitida com base nos registros constantes dos
+A presente declaração é emitida com base nos registros constantes dos
 assentamentos funcionais e dos sistemas oficiais de gestão de pessoas
 do Ministério Público do Estado de Rondônia.
 </p>
 
 <p>
-Esta certidão é emitida a requerimento do(a) interessado(a), para
+Este documento é emitido a requerimento do(a) interessado(a), para
 fins de comprovação de vínculo funcional perante órgãos públicos,
 instituições privadas, instituições de ensino, concursos públicos,
 processos seletivos e demais finalidades legalmente admitidas.

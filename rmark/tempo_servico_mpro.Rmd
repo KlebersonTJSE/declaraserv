@@ -487,7 +487,7 @@ Declaração de Tempo de Serviço nº `r numero_certidao`
 
 <p>
 Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF nº
-<strong>`r cpf`</strong>, matrícula funcional nº <strong>`r matricula`</strong>,
+<strong>`r cpf`</strong>, matrícula nº <strong>`r matricula`</strong>,
 exerceu/exerce suas atividades funcionais junto ao <strong>Ministério
 Público do Estado de Rondônia – MPRO</strong>, conforme os registros
 constantes de seus assentamentos funcionais.
@@ -544,7 +544,7 @@ if (tempo_descontado_texto != "") {
 
 <div class="certidao-corpo">
 <p>
-O cálculo acima foi realizado com base nos registros funcionais
+O presente documento baseia-se nos registros constantes
 disponíveis até <strong>`r data_corte`</strong>, observadas as regras
 administrativas aplicáveis ao conceito de tempo de serviço/efetivo
 exercício.
@@ -557,7 +557,7 @@ previdenciários.
 </p>
 
 <p>
-É emitida a requerimento do(a) interessado(a), para fins de
+A presente declaração é emitida a requerimento do(a) interessado(a), para fins de
 comprovação de tempo de serviço perante órgãos públicos, instituições
 privadas, concursos públicos, processos seletivos, instituições de
 ensino e demais finalidades legalmente admitidas.

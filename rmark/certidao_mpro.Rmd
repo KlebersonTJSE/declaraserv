@@ -374,6 +374,23 @@ Certidão nº `r numero_certidao`
 <div class="certidao-corpo">
 
 <p>
+
+Nivel Medio
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realiza Estágio (nível médio) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000, encontrando-se em curso na presente data, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+ou 
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realizou Estágio (nível médio) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000 e término em 00/00/0000, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+
+Nivel Superior
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realizou Estágio (nível superior) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000, encontrando-se em curso na presente data, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+ou
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realizou Estágio (nível superior) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000 e término em 00/00/0000, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+
+MP Residente
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realizou MP-Residência (nível superior completo com realização de pós-graduação) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000, encontrando-se em curso na presente data, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+ou
+Certificamos, para os devidos fins, que FULANO DE TAL, matrícula nº 0000, realizou MP-Residência (nível superior completo com realização de pós-graduação) no Ministério Público do Estado de Rondônia, na unidade DIRETORIA DE QUALQUER COISA, com início em 00/00/0000 e término em 00/00/0000, sob a supervisão de FULANO DE TAL, CARGO, matrícula 0000.
+
+
 Certificamos, para os devidos fins, que <strong>`r nome`</strong>,
 matrícula nº <strong>`r matricula`</strong>, realizou Residência no
 Ministério Público do Estado de Rondônia, na unidade de
