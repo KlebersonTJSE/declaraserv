@@ -106,43 +106,84 @@ source(here::here("R", "auth_totp.R"))
 source(here::here("R", "database.R"))
 source(here::here("modules", "mod_totp_admin.R"))
 
-# Avisa (sem interromper) se o Active Directory não estiver configurado —
-# o app ainda pode ser usado só com login via Authenticator (TOTP).
-if (!validar_config_ldap()) {
+# =========================================================================
+# EMPRESAS (MULTI-DISTRO)
+# -------------------------------------------------------------------------
+# Lista de empresas/unidades configuradas em DISTRO_1, DISTRO_2... no
+# .Renviron (ver listar_distros() em R/utils.R). Cada uma tem sua própria
+# configuração de LDAP ({DISTRO}_LDAP_*) e de banco ({DISTRO}_IRIS_*).
+# Adicionar uma nova empresa não exige alterar este arquivo nem
+# R/auth.R/R/database.R — só DISTRO_N + as variáveis correspondentes no
+# .Renviron.
+# =========================================================================
+DISTROS_DISPONIVEIS <- listar_distros()
+
+if (length(DISTROS_DISPONIVEIS) == 0) {
     warning(
-        "Configuração de LDAP/Active Directory incompleta no .Renviron ",
-        "(LDAP_SERVER, LDAP_PORT, LDAP_DOMAIN, LDAP_SEARCH_BASE). ",
-        "O login corporativo (AD) não funcionará até isso ser configurado; ",
-        "o login via Authenticator (TOTP) continua disponível."
+        "Nenhuma empresa configurada em DISTRO_1, DISTRO_2... no ",
+        ".Renviron. O login corporativo (AD) ficará sem opções até isso ",
+        "ser configurado."
     )
 }
+
+# Avisa (sem interromper) sobre configuração incompleta de cada empresa —
+# o app ainda pode ser usado normalmente para as empresas que estiverem
+# corretamente configuradas.
+for (distro_check in DISTROS_DISPONIVEIS) {
+
+    variaveis_esperadas <- c(
+        distro_env(distro_check, "LDAP_SERVER"),
+        distro_env(distro_check, "LDAP_PORT"),
+        distro_env(distro_check, "LDAP_DOMAIN"),
+        distro_env(distro_check, "LDAP_SEARCH_BASE"),
+        distro_env(distro_check, "IRIS_URL"),
+        distro_env(distro_check, "IRIS_USER"),
+        distro_env(distro_check, "IRIS_PASSWORD")
+    )
+
+    faltando <- variaveis_esperadas[
+        Sys.getenv(variaveis_esperadas, unset = "") == ""
+    ]
+
+    if (length(faltando) > 0) {
+        warning(
+            "Configuração incompleta para a empresa '", distro_check,
+            "' no .Renviron: ", paste(faltando, collapse = ", "),
+            ". O login corporativo (AD) e/ou a consulta ao banco dessa ",
+            "empresa falharão até isso ser definido."
+        )
+    }
+}
+rm(distro_check)
 
 # =========================================================================
 # TIPOS DE CERTIDÃO
 # =========================================================================
 
 # =========================================================================
-# RMD_DIR — resolvido via `here`, não dependente do diretório de trabalho
+# RMD_DIR — SEMPRE resolvido via `here`, sem caminho fixo/variável de
+# ambiente de espécie alguma.
 # -------------------------------------------------------------------------
-# Antes o fallback era "~/declaraserv/rmark" (caminho fixo baseado no HOME
-# do usuário do SO). Isso quebra facilmente: se o app for executado por
-# outro usuário/serviço, ou o HOME não apontar pra onde o repositório foi
-# clonado, os templates "somem" mesmo existindo no projeto.
+# BUG CORRIGIDO: existia uma variável DECLARASERV_RMD_DIR no .Renviron que,
+# quando definida (ex.: como "~/declaraserv/rmark"), tinha prioridade
+# sobre o here::here("rmark") abaixo. O problema é que "~" no R/Windows
+# expande para a pasta de Documentos do usuário (via path.expand()), não
+# para a raiz do projeto — por isso o caminho resolvido ficava faltando a
+# subpasta real onde o repositório foi clonado (ex.: ".../Documentos/
+# declaraserv/rmark" em vez de ".../Documentos/Github/declaraserv/rmark").
 #
-# Agora o padrão é relativo à raiz do projeto (âncora definida por
-# here::i_am("app.R") no topo do arquivo), então funciona igual não
-# importa de onde o app é iniciado. DECLARASERV_RMD_DIR no .Renviron
-# ainda pode sobrescrever isso quando necessário (ex.: apontar pra uma
-# pasta fora do repo em produção); nesse caso fazemos
-# normalizePath/path.expand para aceitar caminho absoluto ou "~/...".
+# Removida essa variável/override por completo: agora RMD_DIR é SEMPRE
+# here::here("rmark"), ou seja, a subpasta "rmark" dentro da raiz do
+# projeto — a raiz sendo definida por here::i_am("app.R") no topo deste
+# arquivo, que ancora no local real de onde o app.R foi executado. Isso
+# funciona da mesma forma não importa em qual máquina/pasta o repositório
+# for clonado, sem depender de HOME, de "~" ou de qualquer configuração
+# manual no .Renviron.
+#
+# Se o seu .Renviron ainda tiver uma linha "DECLARASERV_RMD_DIR=...", ela
+# pode ser removida — não é mais lida em lugar nenhum do app.
 # =========================================================================
-RMD_DIR_ENV <- Sys.getenv("DECLARASERV_RMD_DIR", unset = "")
-
-if (nzchar(RMD_DIR_ENV)) {
-    RMD_DIR <- normalizePath(path.expand(RMD_DIR_ENV), winslash = "/", mustWork = FALSE)
-} else {
-    RMD_DIR <- here::here("rmark")
-}
+RMD_DIR <- here::here("rmark")
 
 CERTIDAO_TIPOS <- c(
     "Certidão Simples"                  = file.path(RMD_DIR, "certidao_mpro.Rmd"),
@@ -185,25 +226,49 @@ if (!file.exists(LOGO_PATH)) {
 }
 
 # =========================================================================
+# LOGO DA TELA DE LOGIN
+# -------------------------------------------------------------------------
+# BUG CORRIGIDO: a tela de login referencia "img/declaraserv_logo.png"
+# (tags$img(src = "img/...")), mas nada registrava a pasta "img/" como
+# rota servida pelo Shiny — faltava addResourcePath("img", ...). Sem
+# isso, o navegador pede a imagem e recebe 404, mesmo com o arquivo
+# existindo em disco; é por isso que a logo não aparecia.
+# =========================================================================
+IMG_DIR <- file.path(APP_DIR, "img")
+
+if (dir.exists(IMG_DIR)) {
+    addResourcePath("img", IMG_DIR)
+} else {
+    warning(
+        "Pasta 'img' não encontrada em: ", IMG_DIR,
+        ". A logo da tela de login não será exibida."
+    )
+}
+
+LOGIN_LOGO_PATH <- file.path(IMG_DIR, "declaraserv_logo.png")
+
+if (!file.exists(LOGIN_LOGO_PATH)) {
+    warning(
+        "Logo da tela de login não encontrada em: ", LOGIN_LOGO_PATH,
+        ". A tela de login será exibida sem a logo."
+    )
+}
+
+# =========================================================================
 # CONEXÃO COM O IRIS
 # -------------------------------------------------------------------------
-# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
-# .Renviron. Não há valores padrão hardcoded no código (usuário, senha,
-# caminho do .jar, URL ou JAVA_HOME), pois isso mascarava falhas de
-# configuração — por exemplo, um JAVA_HOME/JAR_PATH de desenvolvimento
-# (Windows) sendo usado silenciosamente em produção e causando
-# ClassNotFoundException. A conexão em si é feita por conectar_banco()
-# (R/database.R), que lê exatamente as mesmas variáveis validadas aqui.
+# O driver JDBC (classe + .jar) é compartilhado por todas as empresas por
+# padrão — validado aqui uma única vez, de forma obrigatória, pois sem
+# ele NENHUMA empresa consegue conectar. As credenciais específicas de
+# cada empresa (URL/usuário/senha) já foram checadas (com aviso, não
+# obrigatório) no laço de EMPRESAS (MULTI-DISTRO) acima, e são lidas de
+# fato por conectar_banco(distro) em R/database.R.
 # =========================================================================
 DRIVER_CLASS <- Sys.getenv(
     "IRIS_DRIVER_CLASS",
     unset = "com.intersystems.jdbc.IRISDriver"
 )
-JAR_PATH  <- obter_env_obrigatoria("IRIS_JAR_PATH")
-
-IRIS_URL  <- obter_env_obrigatoria("MPRO_IRIS_URL")
-IRIS_USER <- obter_env_obrigatoria("MPRO_IRIS_USER")
-IRIS_PASS <- obter_env_obrigatoria("MPRO_IRIS_PASSWORD")
+JAR_PATH <- obter_env_obrigatoria("IRIS_JAR_PATH")
 
 if (!file.exists(JAR_PATH)) {
     stop(
@@ -246,9 +311,19 @@ garantir_schema_login <- function(con) {
             login      TEXT PRIMARY KEY,
             nome       TEXT NOT NULL,
             secret_key TEXT NOT NULL,
+            distro     TEXT,
             ativo      INTEGER NOT NULL DEFAULT 1
         )
     ")
+
+    # Migração: instalações que já rodaram uma versão anterior deste app
+    # (antes do suporte multi-empresa) têm a tabela usuarios_totp sem a
+    # coluna "distro" — CREATE TABLE IF NOT EXISTS não adiciona colunas
+    # a uma tabela já existente, então isso precisa ser feito à parte.
+    colunas_totp <- dbListFields(con, "usuarios_totp")
+    if (!("distro" %in% colunas_totp)) {
+        dbExecute(con, "ALTER TABLE usuarios_totp ADD COLUMN distro TEXT")
+    }
 }
 
 garantir_schema_login(con)
@@ -260,9 +335,9 @@ onStop(function() {
 # =========================================================================
 # CONSULTA
 # =========================================================================
-consultar_matricula <- function(matricula_num) {
+consultar_matricula <- function(matricula_num, distro) {
 
-    con_iris <- conectar_banco()
+    con_iris <- conectar_banco(distro)
 
     on.exit(
         try(dbDisconnect(con_iris), silent = TRUE),
@@ -818,6 +893,11 @@ server <- function(input, output, session) {
     # Método efetivamente usado no login bem-sucedido ("AD" | "TOTP")
     metodoAutenticado <- reactiveVal(NULL)
 
+    # Empresa (distro) do usuário autenticado — escolhida manualmente no
+    # login AD, ou herdada do cadastro TOTP (ver R/auth_totp.R). É ela
+    # que decide qual banco IRIS é consultado em consultar_matricula().
+    distroSelecionado <- reactiveVal(NULL)
+
     # ===================================================
     # ESTADO DO CABEÇALHO
     # ===================================================
@@ -913,10 +993,24 @@ server <- function(input, output, session) {
 
     observeEvent(input$entrar, {
 
-        req(input$usuario, input$senha)
+        req(input$usuario, input$senha, input$distro_ad)
+
+        distro_escolhida <- input$distro_ad
+
+        # Defesa extra: o <select> já restringe as opções no navegador,
+        # mas nada impede uma requisição manipulada tentando mandar um
+        # valor fora da lista — Sys.getenv() com um nome inválido não
+        # causaria dano, mas validamos mesmo assim para dar um erro claro.
+        if (!(distro_escolhida %in% DISTROS_DISPONIVEIS)) {
+            showNotification(
+                "Empresa selecionada é inválida.",
+                type = "error"
+            )
+            return(invisible(NULL))
+        }
 
         dados <- tryCatch(
-            authenticate_ad(input$usuario, input$senha),
+            authenticate_ad(input$usuario, input$senha, distro_escolhida),
             error = function(e) {
                 showNotification(
                     paste("Erro ao consultar o Active Directory:", conditionMessage(e)),
@@ -926,7 +1020,12 @@ server <- function(input, output, session) {
             }
         )
 
-        registrar_auditoria(con, input$usuario, "AD", !is.null(dados))
+        registrar_auditoria(
+            con,
+            input$usuario,
+            paste0("AD:", distro_escolhida),
+            !is.null(dados)
+        )
 
         if (!is.null(dados)) {
 
@@ -935,6 +1034,7 @@ server <- function(input, output, session) {
             dadosUsuario(dados)
             fotoUsuario(obter_foto_usuario(dados))
             metodoAutenticado("AD")
+            distroSelecionado(distro_escolhida)
             menuSelecionado("Certidão MPRO")
 
             updateTabsetPanel(
@@ -969,6 +1069,22 @@ server <- function(input, output, session) {
 
         dados <- autenticar_totp(con, input$usuario_totp, input$codigo_totp)
 
+        if (!is.null(dados) && (is.null(dados$distro) || is.na(dados$distro) || trimws(dados$distro) == "")) {
+            # Usuário TOTP cadastrado antes do suporte multi-empresa (ou
+            # sem empresa definida): não dá pra saber qual banco consultar.
+            showNotification(
+                paste0(
+                    "O usuário '", dados$login, "' não tem uma empresa ",
+                    "associada. Peça para um administrador recadastrar o ",
+                    "acesso TOTP em Administração TOTP, selecionando a ",
+                    "empresa."
+                ),
+                type = "error",
+                duration = 10
+            )
+            dados <- NULL
+        }
+
         if (!is.null(dados)) {
 
             autenticado(TRUE)
@@ -976,6 +1092,7 @@ server <- function(input, output, session) {
             dadosUsuario(dados)
             fotoUsuario(NULL)
             metodoAutenticado("TOTP")
+            distroSelecionado(dados$distro)
             menuSelecionado("Certidão MPRO")
 
             updateTabsetPanel(
@@ -1012,6 +1129,7 @@ server <- function(input, output, session) {
         fotoUsuario(NULL)
         metodoAutenticado(NULL)
         metodoAcesso(NULL)
+        distroSelecionado(NULL)
         menuSelecionado("Certidão MPRO")
 
         # Dados da certidão são de uma pessoa específica; ao sair, não
@@ -1065,26 +1183,26 @@ server <- function(input, output, session) {
                     class = "logo-container mb-4",
 
                     tags$img(
-                        src = "img/logo_mpro.png",
+                        src = "img/declaraserv_logo.png",
                         class = "logo-login",
                         alt = "DeclaraServ"
                     )
                 ),
 
-                div(
-                    class = "login-icon-badge mb-3",
-                    icon("shield-halved")
-                ),
-
-                tags$h4(
-                    "Declaraserv",
-                    class = "login-title fw-bold mb-1"
-                ),
-
-                tags$p(
-                    "Acesso ao sistema de emissão de certidões",
-                    class = "login-subtitle text-muted mb-4"
-                ),
+                # div(
+                #     class = "login-icon-badge mb-3",
+                #     icon("shield-halved")
+                # ),
+                #
+                # tags$h4(
+                #     "Declaraserv",
+                #     class = "login-title fw-bold mb-1"
+                # ),
+                #
+                # tags$p(
+                #     "Acesso ao sistema de emissão de certidões On-line",
+                #     class = "login-subtitle text-muted mb-4"
+                # ),
 
                 if (is.null(metodoAcesso())) {
 
@@ -1145,6 +1263,17 @@ server <- function(input, output, session) {
                             "voltar_metodo",
                             tagList(icon("arrow-left"), " Voltar"),
                             class = "voltar-link mb-4 d-inline-block"
+                        ),
+
+                        div(
+                            class = "mb-3",
+                            selectInput(
+                                "distro_ad",
+                                "Empresa / Unidade",
+                                choices = DISTROS_DISPONIVEIS,
+                                selected = if (length(DISTROS_DISPONIVEIS) > 0) DISTROS_DISPONIVEIS[1] else NULL,
+                                width = "100%"
+                            )
                         ),
 
                         div(
@@ -1301,6 +1430,10 @@ server <- function(input, output, session) {
                             extrair_manager(dadosUsuario()$manager),
                             br(),
 
+                            tags$b("Empresa: "),
+                            distroSelecionado(),
+                            br(),
+
                             tags$b("Método de acesso: "),
                             "Login Corporativo (AD)"
 
@@ -1318,6 +1451,10 @@ server <- function(input, output, session) {
 
                             tags$b("Login: "),
                             dadosUsuario()$login,
+                            br(),
+
+                            tags$b("Empresa: "),
+                            distroSelecionado(),
                             br(),
 
                             tags$b("Método de acesso: "),
@@ -1366,6 +1503,21 @@ server <- function(input, output, session) {
 
         req(autenticado())
 
+        distro_atual <- distroSelecionado()
+
+        if (is.null(distro_atual) || trimws(distro_atual) == "") {
+            showModal(
+                modalDialog(
+                    title = "Empresa não definida",
+                    "Sua sessão não tem uma empresa associada. Saia e ",
+                    "entre novamente selecionando a empresa correta.",
+                    easyClose = TRUE,
+                    footer = modalButton("Fechar")
+                )
+            )
+            return(invisible(NULL))
+        }
+
         matricula_txt <- trimws(input$matricula)
         matricula_num <- validar_matricula(matricula_txt)
 
@@ -1381,7 +1533,7 @@ server <- function(input, output, session) {
             {
                 resultado <- tryCatch(
                     {
-                        df <- consultar_matricula(matricula_num)
+                        df <- consultar_matricula(matricula_num, distro_atual)
                         incProgress(0.7)
                         df
                     },
