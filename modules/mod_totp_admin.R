@@ -102,7 +102,7 @@ mod_totp_admin_ui <- function(id) {
             ),
 
             nav_panel(
-                "Auditoria",
+                "Auditoria - Tabela",
 
                 p(
                     class = "text-muted",
@@ -111,7 +111,60 @@ mod_totp_admin_ui <- function(id) {
                     "via Authenticator (TOTP), bem-sucedidas ou não."
                 ),
 
+                fluidRow(
+                    column(
+                        4,
+                        selectInput(
+                            ns("filtro_periodo"),
+                            "Filtrar por período do dia",
+                            choices = c("Todos", "Manhã", "Tarde", "Noite"),
+                            selected = "Todos"
+                        )
+                    )
+                ),
+
+                uiOutput(ns("resumo_periodos")),
+
                 DTOutput(ns("tabela_auditoria"))
+            ),
+
+            nav_panel(
+                "Auditoria - Gráfico",
+
+                p(
+                    class = "text-muted",
+                    style = "font-size: 13px; margin-top: 10px;",
+                    "Use o controle deslizante abaixo para escolher a data ",
+                    "inicial e final do período considerado nos gráficos."
+                ),
+
+                uiOutput(ns("slider_periodo_grafico_ui")),
+
+                fluidRow(
+                    column(
+                        6,
+                        h5("Acessos por usuário", style = "margin-top: 20px;"),
+                        plotOutput(ns("grafico_auditoria_usuarios"), height = "420px")
+                    ),
+                    column(
+                        6,
+                        h5("Acessos por empresa", style = "margin-top: 20px;"),
+                        plotOutput(ns("grafico_auditoria_empresas"), height = "420px")
+                    )
+                ),
+
+                fluidRow(
+                    column(
+                        6,
+                        h5("Acessos por método", style = "margin-top: 24px;"),
+                        plotOutput(ns("grafico_auditoria_metodo"), height = "420px")
+                    ),
+                    column(
+                        6,
+                        h5("Acessos por período do dia", style = "margin-top: 24px;"),
+                        plotOutput(ns("grafico_auditoria_periodo"), height = "420px")
+                    )
+                )
             ),
 
             nav_panel(
@@ -147,7 +200,9 @@ mod_totp_admin_ui <- function(id) {
 
                 uiOutput(ns("resultado_validacao"))
             )
-        )
+        ),
+
+        uiOutput(ns("tempo_processamento_bd"))
     )
 }
 
@@ -155,8 +210,23 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
 
     moduleServer(id, function(input, output, session) {
 
+        ns <- session$ns
+
         atualizar_tabela <- reactiveVal(0)
         ultimo_cadastro <- reactiveVal(NULL)
+
+        # Tempo da última operação de banco (qualquer uma) — exibido no
+        # rodapé da tela (ver output$tempo_processamento_bd, no final do
+        # arquivo). registrar_tempo_bd() é chamada logo após cada consulta
+        # ou gravação no banco feita por este módulo.
+        tempoUltimoProcessamento <- reactiveVal(NULL)
+
+        registrar_tempo_bd <- function(descricao, inicio) {
+            tempoUltimoProcessamento(list(
+                descricao = descricao,
+                segundos = as.numeric(difftime(Sys.time(), inicio, units = "secs"))
+            ))
+        }
 
         # Guarda o data.frame atualmente exibido na tabela, para que o
         # clique em uma linha (input$tabela_totp_rows_selected) consiga
@@ -190,7 +260,12 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
             }
 
             resultado <- tryCatch(
-                cadastrar_usuario_totp(con, login, nome, distro),
+                {
+                    t0 <- Sys.time()
+                    r <- cadastrar_usuario_totp(con, login, nome, distro)
+                    registrar_tempo_bd("Cadastro de usuário TOTP", t0)
+                    r
+                },
                 error = function(e) {
                     showNotification(
                         paste("Erro ao cadastrar:", conditionMessage(e)),
@@ -224,7 +299,9 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
 
             tryCatch(
                 {
+                    t0 <- Sys.time()
                     desativar_usuario_totp(con, login)
+                    registrar_tempo_bd("Desativação de usuário TOTP", t0)
                     atualizar_tabela(atualizar_tabela() + 1)
                     showNotification(
                         paste0("Acesso TOTP de '", login, "' desativado."),
@@ -274,7 +351,10 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
             req(ativo())
             atualizar_tabela()
 
+            t0 <- Sys.time()
             dados <- listar_usuarios_totp(con)
+            registrar_tempo_bd("Consulta de usuários TOTP cadastrados", t0)
+
             dadosTotpAtual(dados)
 
             datatable(
@@ -287,15 +367,159 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
 
         # ---------------------------------------------------------------
         # AUDITORIA DE LOGIN
+        # -----------------------------------------------------------------
+        # O período considerado vem do controle deslizante (definido na
+        # aba "Auditoria - Gráfico") SÓ quando o filtro está ativado
+        # (input$usar_filtro_periodo); caso contrário, usa todo o
+        # histórico gravado no banco. Isso é o que faz a aba
+        # "Auditoria - Tabela" mostrar dados assim que a pessoa loga, sem
+        # precisar visitar a aba "Auditoria - Gráfico" antes: como o
+        # slider é um uiOutput de uma aba escondida, o Shiny suspende sua
+        # renderização (e não define input$periodo_grafico) enquanto ela
+        # não for visitada — então, por padrão (filtro desativado), a
+        # consulta abaixo nunca depende dele.
+        #
+        # Cada acesso é classificado em Manhã (06h–11h59), Tarde
+        # (12h–17h59) ou Noite (demais horários, cobrindo a madrugada
+        # também).
         # ---------------------------------------------------------------
-        output$tabela_auditoria <- renderDT({
+        classificar_periodo <- function(hora) {
+            ifelse(
+                hora >= 6 & hora < 12, "Manhã",
+                ifelse(hora >= 12 & hora < 18, "Tarde", "Noite")
+            )
+        }
+
+        # Menor/maior data já registrada em login_auditoria — consulta
+        # leve, usada tanto para dimensionar o slider quanto como período
+        # padrão quando o filtro está desativado.
+        intervaloAuditoria <- reactive({
+            req(ativo())
+
+            t0 <- Sys.time()
+            intervalo <- obter_intervalo_auditoria(con)
+            registrar_tempo_bd("Consulta do intervalo de datas da auditoria", t0)
+
+            intervalo
+        })
+
+        output$slider_periodo_grafico_ui <- renderUI({
+
+            intervalo <- intervaloAuditoria()
+            req(nrow(intervalo) > 0, !is.na(intervalo$minimo[1]))
+
+            data_min_real <- as.Date(intervalo$minimo[1])
+            data_max_real <- as.Date(intervalo$maximo[1])
+
+            # O slider sempre cobre pelo menos 180 dias, mesmo que o
+            # histórico gravado seja mais curto que isso.
+            data_min_slider <- min(data_min_real, data_max_real - 180)
+
+            tagList(
+                checkboxInput(
+                    ns("usar_filtro_periodo"),
+                    "Usar filtro de período (caso desmarcado, considera todo o histórico gravado no banco)",
+                    value = FALSE
+                ),
+                sliderInput(
+                    ns("periodo_grafico"),
+                    "Data inicial e final",
+                    min = data_min_slider,
+                    max = data_max_real,
+                    value = c(max(data_min_slider, data_max_real - 180), data_max_real),
+                    timeFormat = "%d/%m/%Y"
+                )
+            )
+        })
+
+        # Dados do período considerado (filtro ativo → slider; filtro
+        # inativo → todo o histórico) — buscados direto do banco já
+        # filtrados por data (ver listar_auditoria_login()).
+        dadosAuditoriaPeriodo <- reactive({
 
             req(ativo())
 
-            dados <- listar_auditoria_login(con)
+            intervalo <- intervaloAuditoria()
+            req(nrow(intervalo) > 0, !is.na(intervalo$minimo[1]))
 
-            if (nrow(dados) > 0 && "sucesso" %in% names(dados)) {
+            if (isTRUE(input$usar_filtro_periodo)) {
+                req(input$periodo_grafico)
+                data_inicio <- input$periodo_grafico[1]
+                data_fim <- input$periodo_grafico[2]
+            } else {
+                data_inicio <- as.Date(intervalo$minimo[1])
+                data_fim <- as.Date(intervalo$maximo[1])
+            }
+
+            t0 <- Sys.time()
+            dados <- listar_auditoria_login(
+                con,
+                data_inicio = data_inicio,
+                data_fim = data_fim
+            )
+            registrar_tempo_bd("Consulta de auditoria de login", t0)
+
+            if (nrow(dados) > 0) {
+                dados$datahora_dt <- as.POSIXct(dados$datahora, tz = "America/Maceio")
+                dados$periodo <- classificar_periodo(
+                    as.integer(format(dados$datahora_dt, "%H"))
+                )
+            }
+
+            dados
+        })
+
+        # -- Tabela (com filtro por período do dia) ----------------------
+
+        output$resumo_periodos <- renderUI({
+
+            dados <- dadosAuditoriaPeriodo()
+            req(nrow(dados) > 0)
+
+            niveis <- c("Manhã", "Tarde", "Noite")
+            contagem <- table(factor(dados$periodo, levels = niveis))
+            periodo_top <- names(contagem)[which.max(contagem)]
+
+            intervalo_exibido <- range(as.Date(dados$datahora_dt))
+
+            tags$div(
+                style = "font-size: 13px; color:#555; margin: 4px 0 14px 0;",
+                tags$b("Período considerado: "),
+                paste0(
+                    format(intervalo_exibido[1], "%d/%m/%Y"), " a ",
+                    format(intervalo_exibido[2], "%d/%m/%Y"),
+                    if (isTRUE(input$usar_filtro_periodo)) {
+                        " (filtro ativo — ajustável na aba \"Auditoria - Gráfico\")"
+                    } else {
+                        " (todo o histórico — ative o filtro na aba \"Auditoria - Gráfico\" para restringir)"
+                    }
+                ),
+                tags$br(),
+                tags$b("Acessos por período: "),
+                paste0(
+                    "Manhã: ", contagem[["Manhã"]],
+                    " · Tarde: ", contagem[["Tarde"]],
+                    " · Noite: ", contagem[["Noite"]]
+                ),
+                tags$br(),
+                tags$b("Período com mais acessos: "), periodo_top
+            )
+        })
+
+        output$tabela_auditoria <- renderDT({
+
+            dados <- dadosAuditoriaPeriodo()
+
+            if (nrow(dados) > 0) {
+
+                if (!is.null(input$filtro_periodo) && input$filtro_periodo != "Todos") {
+                    dados <- dados[dados$periodo == input$filtro_periodo, ]
+                }
+
                 dados$sucesso <- ifelse(dados$sucesso == 1, "Sim", "Não")
+                dados <- dados[, c("id", "login", "empresa", "metodo", "sucesso", "datahora", "periodo")]
+                names(dados)[names(dados) == "empresa"] <- "empresa"
+                names(dados)[names(dados) == "periodo"] <- "período"
             }
 
             datatable(
@@ -307,6 +531,114 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
                     pageLength = 10,
                     order = list()
                 )
+            )
+        })
+
+        # -- Gráficos (acessos por usuário e por empresa, no período) ----
+
+        output$grafico_auditoria_usuarios <- renderPlot({
+
+            dados <- dadosAuditoriaPeriodo()
+
+            if (nrow(dados) == 0) {
+                plot.new()
+                text(0.5, 0.5, "Nenhum acesso no período selecionado.")
+                return(invisible(NULL))
+            }
+
+            contagem <- sort(table(dados$login), decreasing = TRUE)
+            cores <- grDevices::hcl.colors(length(contagem), palette = "Set2")
+
+            barplot(
+                contagem,
+                las = 2,
+                col = cores,
+                main = "Quantidade de acessos por usuário",
+                ylab = "Acessos",
+                cex.names = 0.85
+            )
+        })
+
+        output$grafico_auditoria_empresas <- renderPlot({
+
+            dados <- dadosAuditoriaPeriodo()
+
+            if (nrow(dados) == 0) {
+                plot.new()
+                text(0.5, 0.5, "Nenhum acesso no período selecionado.")
+                return(invisible(NULL))
+            }
+
+            contagem <- sort(table(dados$empresa), decreasing = TRUE)
+            cores <- grDevices::hcl.colors(length(contagem), palette = "Set2")
+
+            pie(
+                contagem,
+                col = cores,
+                labels = paste0(names(contagem), " (", contagem, ")"),
+                main = "Acessos por empresa"
+            )
+        })
+
+        # Acessos por método (AD x TOTP) — barplot HORIZONTAL, um modelo
+        # diferente do barplot vertical simples usado em "por usuário".
+        output$grafico_auditoria_metodo <- renderPlot({
+
+            dados <- dadosAuditoriaPeriodo()
+
+            if (nrow(dados) == 0) {
+                plot.new()
+                text(0.5, 0.5, "Nenhum acesso no período selecionado.")
+                return(invisible(NULL))
+            }
+
+            # "AD:TJSE", "AD:MPRO" etc. viram só "AD" aqui — a quebra por
+            # empresa já é mostrada no gráfico de pizza ao lado.
+            metodo_base <- sub(":.*$", "", dados$metodo)
+            contagem <- sort(table(metodo_base), decreasing = TRUE)
+            cores <- grDevices::hcl.colors(length(contagem), palette = "Viridis")
+
+            barplot(
+                contagem,
+                horiz = TRUE,
+                las = 1,
+                col = cores,
+                main = "Quantidade de acessos por método",
+                xlab = "Acessos"
+            )
+        })
+
+        # Acessos por período do dia, comparando sucesso x falha — barplot
+        # AGRUPADO (duas barras lado a lado por período), outro modelo
+        # diferente dos dois já usados acima.
+        output$grafico_auditoria_periodo <- renderPlot({
+
+            dados <- dadosAuditoriaPeriodo()
+
+            if (nrow(dados) == 0) {
+                plot.new()
+                text(0.5, 0.5, "Nenhum acesso no período selecionado.")
+                return(invisible(NULL))
+            }
+
+            niveis <- c("Manhã", "Tarde", "Noite")
+            resultado <- ifelse(dados$sucesso == 1, "Sim", "Não")
+
+            tab <- table(
+                factor(resultado, levels = c("Sim", "Não")),
+                factor(dados$periodo, levels = niveis)
+            )
+
+            cores <- grDevices::hcl.colors(2, palette = "Dark 3")
+
+            barplot(
+                tab,
+                beside = TRUE,
+                col = cores,
+                main = "Acessos por período do dia (sucesso x falha)",
+                ylab = "Acessos",
+                legend.text = rownames(tab),
+                args.legend = list(x = "topright", bty = "n", cex = 0.85)
             )
         })
 
@@ -474,6 +806,32 @@ mod_totp_admin_server <- function(id, con, ativo, resetar = reactiveVal(0)) {
             ultimo_cadastro(NULL)
             updateTextInput(session, "codigo_validacao", value = "")
             resultado_validacao(NULL)
+            tempoUltimoProcessamento(NULL)
         }, ignoreInit = TRUE)
+
+        # ---------------------------------------------------------------
+        # TEMPO DE PROCESSAMENTO (rodapé)
+        # -----------------------------------------------------------------
+        # Mostra a duração da última operação de banco feita por este
+        # módulo (consulta ou gravação), qualquer que ela tenha sido —
+        # ver registrar_tempo_bd(), chamada logo após cada uma delas.
+        # ---------------------------------------------------------------
+        output$tempo_processamento_bd <- renderUI({
+
+            info <- tempoUltimoProcessamento()
+            req(info)
+
+            tags$div(
+                style = paste(
+                    "color:#6c6c6c; font-size: 12px; text-align: right;",
+                    "margin-top: 24px; padding-top: 8px; border-top: 1px solid #eee;"
+                ),
+                sprintf(
+                    "%s: %.3f s",
+                    info$descricao,
+                    info$segundos
+                )
+            )
+        })
     })
 }
