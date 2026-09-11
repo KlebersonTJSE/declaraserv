@@ -1,0 +1,543 @@
+---
+title: ""
+output: 
+  html_document:
+    self_contained: true
+params:
+  matricula: "12345"
+  numero_certidao: "0000/2026"
+  unidade_administrativa: "DIRETORIA DE GESTÃO DE PESSOAS"
+  numero_processo: ""
+  codigo_validacao: ""
+  logo_path: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# =========================================================================
+# .Renviron — carregamento explícito
+# -------------------------------------------------------------------------
+# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R), as
+# variáveis de ambiente já carregadas pelo app.R estão disponíveis aqui.
+# Mas para permitir renderizar/testar este .Rmd isoladamente (fora do
+# Shiny), carregamos o .Renviron da pasta do projeto explicitamente também.
+# =========================================================================
+renviron_path <- file.path(getwd(), ".Renviron")
+
+if (file.exists(renviron_path)) {
+  readRenviron(renviron_path)
+}
+
+# Lê uma variável de ambiente obrigatória; interrompe a renderização com
+# mensagem clara caso ela não esteja definida no .Renviron.
+obter_env_obrigatoria <- function(nome_var) {
+  valor <- Sys.getenv(nome_var, unset = "")
+
+  if (valor == "") {
+    stop(
+      "Variável de ambiente obrigatória não definida: ", nome_var,
+      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
+    )
+  }
+
+  valor
+}
+
+# =========================================================================
+# PACOTES
+# =========================================================================
+library(DBI)
+library(rJava)
+library(RJDBC)
+library(glue)
+library(stringr)
+library(base64enc)
+
+# =========================================================================
+# CONEXÃO COM O IRIS
+# -------------------------------------------------------------------------
+# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
+# .Renviron — sem valores padrão hardcoded no código.
+# =========================================================================
+Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+
+driver_class <- Sys.getenv(
+  "MPRO_IRIS_DRIVER_CLASS",
+  unset = "com.intersystems.jdbc.IRISDriver"
+)
+
+jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
+url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
+iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
+iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
+
+if (!file.exists(jar_path)) {
+  stop(
+    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
+    ". Verifique o caminho configurado no .Renviron para este ",
+    "servidor/ambiente."
+  )
+}
+
+drv <- JDBC(
+  driverClass = driver_class,
+  classPath = jar_path
+)
+
+con <- dbConnect(
+  drv,
+  url,
+  user = iris_user,
+  password = iris_pass
+)
+
+# =========================================================================
+# CONSULTA 1 — Afastamentos funcionais (RHCadAfastamento)
+# -------------------------------------------------------------------------
+# Os códigos de afastamento excluídos no filtro (55,74,75,82,46,114,116,89)
+# correspondem a tipos que não devem constar nesta declaração (ex.:
+# afastamentos de natureza médica/sigilosa ou que não se aplicam a este
+# documento). Mantido conforme regra de negócio definida pela unidade.
+# =========================================================================
+matricula_sql <- as.integer(params$matricula)
+
+if (is.na(matricula_sql)) {
+  stop("Por favor, informe uma matrícula válida no parâmetro 'matricula'.")
+}
+
+query <- glue("
+SELECT
+    Servidor->Nome AS NOME,
+    Servidor->Pessoa->CpfFormatado AS CPF,
+    Servidor->Matricula AS MATRICULA,
+    Servidor->Funcional->CargoEfetivo->Descricao AS CARGO,
+    Afastamento->Descricao AS AFASTAMENTO,
+    DataInicialFormatada AS DATAINICIO,
+    DataFinalFormatada AS DATAFINAL,
+    Dias AS DIAS,
+    YEAR(DataInicial) AS PERIODO,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
+FROM
+    RHCadAfastamento
+WHERE
+    Afastamento NOT IN (55,74,75,82,46,114,116,89)
+    AND Servidor->Matricula = {matricula_sql}
+ORDER BY
+    DataInicial
+")
+
+afastamentos <- dbGetQuery(con, query)
+
+if (nrow(afastamentos) == 0) {
+  stop(
+    glue(
+      "Nenhum afastamento encontrado em RHCadAfastamento para a matrícula {matricula_sql}."
+    )
+  )
+}
+
+# Dados de cabeçalho (nome, CPF, cargo, gestor) — a mesma para todas as
+# linhas retornadas, então usamos a primeira.
+dados <- afastamentos[1, ]
+
+# =========================================================================
+# CONSULTA 2 — Dados do gestor da lotação DGP (RHTabLotacao)
+# =========================================================================
+query_gestor <- "
+SELECT
+    Gestor->Nome AS GESTOR_NOME,
+    Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Gestor->Matricula AS GESTOR_MATRICULA,
+    Email AS EMAIL,
+    TelefonePrincipal AS TELEFONE
+FROM
+    RHTabLotacao
+WHERE
+    Sigla = 'DGP'
+"
+
+dados_gestor <- tryCatch(
+  dbGetQuery(con, query_gestor),
+  error = function(e) {
+    warning("Falha ao consultar RHTabLotacao: ", conditionMessage(e))
+    data.frame(
+      GESTOR_NOME = NA, GESTOR_CARGO = NA, GESTOR_MATRICULA = NA,
+      EMAIL = NA, TELEFONE = NA,
+      stringsAsFactors = FALSE
+    )
+  }
+)
+
+# Usa apenas o primeiro registro retornado
+if (nrow(dados_gestor) > 0) {
+  dados_gestor <- dados_gestor[1, ]
+}
+
+dbDisconnect(con)
+
+# =========================================================================
+# FUNÇÕES DE FORMATAÇÃO
+# =========================================================================
+meses_pt <- c(
+  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+)
+
+parse_data <- function(x) {
+  if (length(x) == 0) return(as.Date(NA))
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x) || trimws(as.character(x)) == "") {
+    return(as.Date(NA))
+  }
+  if (inherits(x, "Date")) return(as.Date(x))
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+
+  x <- trimws(as.character(x))
+  formatos <- c("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y")
+
+  for (fmt in formatos) {
+    resultado <- suppressWarnings(as.Date(x, format = fmt))
+    if (!is.na(resultado)) return(resultado)
+  }
+
+  resultado <- suppressWarnings(as.Date(x))
+  if (!is.na(resultado)) return(resultado)
+
+  stop("Não foi possível interpretar a data: ", x)
+}
+
+formatar_data_curta <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  format(d, "%d/%m/%Y")
+}
+
+formatar_data_extenso <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  glue("{format(d, '%d')} de {meses_pt[as.integer(format(d, '%m'))]} de {format(d, '%Y')}")
+}
+
+clean_html <- function(x) {
+  if (length(x) == 0) return("")
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x)) return("")
+  as.character(x)
+}
+
+formatar_dias <- function(x) {
+  if (length(x) == 0 || is.na(x)) return("")
+  format(as.integer(x), big.mark = ".")
+}
+
+# =========================================================================
+# CAMPOS — Cabeçalho
+# =========================================================================
+nome      <- clean_html(str_to_upper(as.character(dados$NOME)))
+cpf       <- clean_html(dados$CPF)
+matricula <- clean_html(dados$MATRICULA)
+cargo     <- clean_html(dados$CARGO)
+
+    # =====================================================================
+    # Dados do Gestor do Servidor
+    # =====================================================================
+    # gestor    <- clean_html(dados$GESTOR_NOME)
+    # cargogestor     <- clean_html(dados$GESTOR_CARGO)
+    # matriculagestor <- clean_html(dados$GESTOR_MATRICULA)
+
+gestor        <- clean_html(dados_gestor$GESTOR_NOME)
+cargogestor   <- clean_html(dados_gestor$GESTOR_CARGO)
+matriculagestor <- clean_html(dados_gestor$GESTOR_MATRICULA)
+emailgestor   <- clean_html(dados_gestor$EMAIL)
+telefonegestor <- clean_html(dados_gestor$TELEFONE)
+
+numero_certidao <- clean_html(params$numero_certidao)
+unidade_administrativa <- clean_html(params$unidade_administrativa)
+numero_processo <- clean_html(params$numero_processo)
+codigo_validacao <- clean_html(params$codigo_validacao)
+datahoje <- formatar_data_extenso(Sys.Date())
+
+# =========================================================================
+# TABELA DE AFASTAMENTOS
+# =========================================================================
+afastamentos$PERIODO_FMT     <- vapply(afastamentos$PERIODO, clean_html, character(1))
+afastamentos$AFASTAMENTO_FMT <- vapply(afastamentos$AFASTAMENTO, clean_html, character(1))
+afastamentos$DATAINICIO_FMT  <- vapply(afastamentos$DATAINICIO, formatar_data_curta, character(1))
+afastamentos$DATAFINAL_FMT   <- vapply(afastamentos$DATAFINAL, formatar_data_curta, character(1))
+afastamentos$DIAS_FMT        <- vapply(afastamentos$DIAS, formatar_dias, character(1))
+
+total_dias <- suppressWarnings(sum(as.integer(afastamentos$DIAS), na.rm = TRUE))
+total_dias_fmt <- format(total_dias, big.mark = ".")
+
+# =========================================================================
+# LOGOTIPO
+# =========================================================================
+logo_path <- as.character(params$logo_path)
+if (is.na(logo_path) || logo_path == "") {
+  logo_path <- file.path(getwd(), "assets", "logo_mpro.png")
+}
+
+logo_base64 <- ""
+if (file.exists(logo_path)) {
+  logo_bytes <- readBin(logo_path, "raw", file.info(logo_path)$size)
+  logo_base64 <- paste0("data:image/png;base64,", base64enc::base64encode(logo_bytes))
+}
+```
+
+```{css, echo=FALSE}
+body {
+  font-family: "Georgia", "Times New Roman", serif;
+  color: #1a1a1a;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px;
+  line-height: 1.6;
+}
+
+.certidao-cabecalho {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.certidao-cabecalho img {
+  max-height: 90px;
+  margin-bottom: 12px;
+}
+
+.certidao-cabecalho h1 {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 4px 0;
+}
+
+.certidao-cabecalho h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #444;
+  margin: 2px 0;
+}
+
+.certidao-cabecalho h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  margin: 2px 0 24px 0;
+}
+
+.certidao-titulo {
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 24px 0;
+}
+
+.certidao-corpo {
+  text-align: justify;
+  font-size: 15px;
+  margin-bottom: 24px;
+}
+
+.certidao-corpo p {
+  margin-bottom: 16px;
+}
+
+.certidao-secao h4 {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 4px;
+  margin: 28px 0 12px 0;
+}
+
+.tabela-afastamentos {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 16px 0 8px 0;
+}
+
+.tabela-afastamentos th,
+.tabela-afastamentos td {
+  border: 1px solid #ccc;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.tabela-afastamentos th {
+  background-color: #f2f2f2;
+  font-weight: 700;
+}
+
+.tabela-afastamentos tfoot td {
+  font-weight: 700;
+  background-color: #f8f8f8;
+}
+
+.certidao-aviso {
+  font-size: 13px;
+  font-style: italic;
+  margin: 16px 0;
+}
+
+.certidao-rodape {
+  margin-top: 40px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura {
+  margin-top: 64px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura .linha {
+  display: inline-block;
+  border-top: 1px solid #1a1a1a;
+  padding-top: 6px;
+  min-width: 320px;
+}
+
+.certidao-validacao {
+  margin-top: 32px;
+  font-size: 12px;
+  color: #555;
+  text-align: center;
+  line-height: 1.8;
+}
+```
+
+<div class="certidao-cabecalho">
+```{r logo-html, results='asis'}
+if (logo_base64 != "") {
+  cat(glue('<img src="{logo_base64}" alt="Logo MPRO" />'))
+}
+```
+<h1>Ministério Público do Estado de Rondônia</h1>
+<h2>Procuradoria-Geral de Justiça</h2>
+<h3>`r unidade_administrativa`</h3>
+</div>
+
+<div class="certidao-titulo">
+Declaração de Afastamentos Funcionais nº `r numero_certidao`
+</div>
+
+<div class="certidao-corpo">
+
+<p>
+Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF nº
+<strong>`r cpf`</strong>, matrícula nº <strong>`r matricula`</strong>,
+ocupante do cargo de <strong>`r cargo`</strong>, possui registrados em
+seus assentamentos funcionais os seguintes períodos de
+afastamento/licença:
+</p>
+
+</div>
+
+<div class="certidao-secao">
+<h4>1. Afastamentos registrados</h4>
+
+```{r tabela-afastamentos, results='asis'}
+cat('<table class="tabela-afastamentos">')
+cat('<thead><tr><th>Período</th><th>Tipo de afastamento/licença</th><th>Início</th><th>Fim</th><th>Dias ausentes</th></tr></thead>')
+cat('<tbody>')
+for (i in seq_len(nrow(afastamentos))) {
+  fim_txt <- if (afastamentos$DATAFINAL_FMT[i] == "") "em curso" else afastamentos$DATAFINAL_FMT[i]
+  cat(glue(
+    "<tr><td>{afastamentos$PERIODO_FMT[i]}</td>",
+    "<td>{afastamentos$AFASTAMENTO_FMT[i]}</td>",
+    "<td>{afastamentos$DATAINICIO_FMT[i]}</td>",
+    "<td>{fim_txt}</td>",
+    "<td>{afastamentos$DIAS_FMT[i]}</td></tr>"
+  ))
+}
+cat('</tbody>')
+cat(glue(
+  "<tfoot><tr><td colspan='4' style='text-align:right;'>Total de dias ausentes</td>",
+  "<td>{total_dias_fmt}</td></tr></tfoot>"
+))
+cat('</table>')
+```
+
+</div>
+
+<div class="certidao-secao">
+<h4>2. Informações complementares</h4>
+
+<div class="certidao-corpo">
+<p>
+Os afastamentos acima foram registrados nos assentamentos funcionais
+do(a) servidor(a) mediante os procedimentos administrativos e
+documentos comprobatórios pertinentes.
+</p>
+
+<p class="certidao-aviso">
+Quando o afastamento decorrer de benefício previdenciário ou de
+competência de outro órgão/entidade, esta declaração limita-se a
+registrar o período de afastamento funcional constante dos
+assentamentos do Ministério Público do Estado de Rondônia, não
+constituindo declaração de concessão ou manutenção de benefício
+previdenciário.
+</p>
+
+<p class="certidao-aviso">
+A presente declaração <strong>não contém informações relativas a
+diagnóstico, CID ou outros dados médicos protegidos</strong>,
+limitando-se às informações funcionais necessárias à comprovação do
+afastamento.
+</p>
+
+<p>
+A presente declaração é emitida a requerimento do(a) interessado(a), para fins de
+comprovação perante órgãos públicos, instituições privadas,
+instituições de ensino, empregadores, entidades previdenciárias ou
+outras instituições que necessitem comprovar o período de
+afastamento funcional.
+</p>
+</div>
+</div>
+
+<div class="certidao-rodape">
+<p>Porto Velho/RO, `r datahoje`.</p>
+</div>
+
+<div class="certidao-assinatura">
+<span class="linha">
+`r gestor`<br>`r cargogestor`<br>
+Ministério Público do Estado de Rondônia<br>
+Matrícula nº `r matriculagestor`<br>
+E-mail: `r emailgestor`<br>
+Telefone: `r telefonegestor`
+</span>
+</div>
+
+<p style="text-align:center; font-size:12px; margin-top:24px;">
+<strong>Documento assinado eletronicamente.</strong>
+</p>
+
+```{r validacao, results='asis'}
+linhas <- c()
+if (codigo_validacao != "") {
+  linhas <- c(linhas, glue("<strong>Código de validação:</strong> {codigo_validacao}"))
+}
+if (numero_processo != "") {
+  linhas <- c(linhas, glue("<strong>Processo/Requerimento nº:</strong> {numero_processo}"))
+}
+if (length(linhas) > 0) {
+  cat('<div class="certidao-validacao">')
+  cat(paste(linhas, collapse = "<br>"))
+  cat('</div>')
+}
+```

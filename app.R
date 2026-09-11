@@ -162,48 +162,103 @@ rm(distro_check)
 # =========================================================================
 # RMD_DIR — SEMPRE resolvido via `here`, sem caminho fixo/variável de
 # ambiente de espécie alguma.
+# -------------------------------------------------------------------------
+# Com o suporte multi-empresa, os templates deixaram de ficar soltos
+# direto em "rmark/" (antes distinguidos por sufixo, ex.: "certidao_MPRO.Rmd")
+# e passaram a ficar em uma subpasta por empresa, com o MESMO nome da
+# empresa escolhida no login (ex.: "rmark/MPRO/certidao.Rmd"), sem sufixo.
+# O mesmo vale para os assets (logo), em "assets/<empresa>/logo.png".
+# Por isso RMD_DIR/ASSETS_DIR abaixo são apenas os diretórios BASE — o
+# caminho final de cada arquivo só é conhecido depois do login, quando a
+# empresa (distro) do usuário é definida (ver obter_certidao_tipos() e
+# obter_logo_path(), usados no servidor via distroSelecionado()).
 # =========================================================================
 RMD_DIR <- here::here("rmark")
 
-CERTIDAO_TIPOS <- c(
-    "Certidão Simples"                  = file.path(RMD_DIR, "certidao_mpro.Rmd"),
-    "Certidão de Afastamento Funcional" = file.path(RMD_DIR, "afastamento_funcional_mpro.Rmd"),
-    "Certidão Funcional Consolidada"    = file.path(RMD_DIR, "funcional_consolidada_mpro.Rmd"),
-    "Certidão de Tempo de Contribuição" = file.path(RMD_DIR, "tempo_contribuicao_mpro.Rmd"),
-    "Certidão de Tempo de Serviço"      = file.path(RMD_DIR, "tempo_servico_mpro.Rmd"),
-    "Certidão de Vínculo Funcional"     = file.path(RMD_DIR, "vinculo_funcional_mpro.Rmd")
-)
-
-# Caminho padrão usado apenas para a checagem inicial de existência do
-# template "principal" (Certidão Simples).
-RMD_PATH <- CERTIDAO_TIPOS[["Certidão Simples"]]
-
-if (!file.exists(RMD_PATH)) {
-    stop("Arquivo RMarkdown não encontrado em: ", RMD_PATH)
+if (!dir.exists(RMD_DIR)) {
+    stop("Pasta base de templates RMarkdown não encontrada em: ", RMD_DIR)
 }
 
-# Avisa (sem interromper) sobre templates de outras certidões que ainda
-# não existam na pasta configurada.
-for (tipo_nome in names(CERTIDAO_TIPOS)) {
-    caminho_tipo <- CERTIDAO_TIPOS[[tipo_nome]]
-    if (!file.exists(caminho_tipo)) {
+if (!dir.exists(ASSETS_DIR)) {
+    stop("Pasta base de assets não encontrada em: ", ASSETS_DIR)
+}
+
+# Monta os caminhos dos templates de certidão para uma empresa (distro)
+# específica, dentro da subpasta "rmark/<empresa>/".
+# -------------------------------------------------------------------------
+# `distro` é normalizado para MAIÚSCULAS aqui pelo mesmo motivo que em
+# conectar_banco()/distro_env() (R/database.R e R/utils.R): listar_distros()
+# devolve o valor exatamente como está escrito no .Renviron (sem forçar
+# caixa), mas cadastrar_usuario_totp() SEMPRE grava a empresa do usuário
+# TOTP em maiúsculas. Sem essa normalização, login AD e login TOTP da
+# mesma empresa poderiam resolver para subpastas de nomes diferentes
+# (ex.: "rmark/Mpro/" vs "rmark/MPRO/") caso o .Renviron não esteja
+# 100% em maiúsculas. Por isso as subpastas físicas devem sempre usar o
+# nome da empresa em MAIÚSCULAS (ex.: "rmark/MPRO/", "assets/MPRO/").
+obter_certidao_tipos <- function(distro) {
+    distro <- toupper(trimws(distro))
+    rmd_dir_empresa <- file.path(RMD_DIR, distro)
+
+    c(
+        "Certidão Simples"                  = file.path(rmd_dir_empresa, "certidao.Rmd"),
+        "Certidão de Afastamento Funcional" = file.path(rmd_dir_empresa, "afastamento_funcional.Rmd"),
+        "Certidão Funcional Consolidada"    = file.path(rmd_dir_empresa, "funcional_consolidada.Rmd"),
+        "Certidão de Tempo de Contribuição" = file.path(rmd_dir_empresa, "tempo_contribuicao.Rmd"),
+        "Certidão de Tempo de Serviço"      = file.path(rmd_dir_empresa, "tempo_servico.Rmd"),
+        "Certidão de Vínculo Funcional"     = file.path(rmd_dir_empresa, "vinculo_funcional.Rmd")
+    )
+}
+
+# Caminho do logo (usado na geração da certidão) para uma empresa
+# específica, dentro da subpasta "assets/<empresa>/". Ver nota de
+# normalização de maiúsculas acima, em obter_certidao_tipos().
+obter_logo_path <- function(distro) {
+    distro <- toupper(trimws(distro))
+    file.path(ASSETS_DIR, distro, "logo.png")
+}
+
+# Avisa (sem interromper) sobre pastas/templates/logo de cada empresa
+# configurada que ainda não existam — o app segue funcionando normalmente
+# para as empresas corretamente configuradas.
+for (distro_rmd_check in DISTROS_DISPONIVEIS) {
+
+    distro_rmd_check_norm <- toupper(trimws(distro_rmd_check))
+    rmd_dir_empresa_check <- file.path(RMD_DIR, distro_rmd_check_norm)
+
+    if (!dir.exists(rmd_dir_empresa_check)) {
         warning(
-            "Template RMarkdown não encontrado para '", tipo_nome,
-            "': ", caminho_tipo,
-            ". Essa opção falhará se for selecionada até o arquivo ",
-            "ser adicionado."
+            "Subpasta de templates RMarkdown não encontrada para a ",
+            "empresa '", distro_rmd_check, "': ", rmd_dir_empresa_check,
+            ". A geração de certidão falhará para essa empresa até a ",
+            "pasta ser criada."
+        )
+    }
+
+    certidao_tipos_check <- obter_certidao_tipos(distro_rmd_check)
+
+    for (tipo_nome in names(certidao_tipos_check)) {
+        caminho_tipo <- certidao_tipos_check[[tipo_nome]]
+        if (!file.exists(caminho_tipo)) {
+            warning(
+                "Template RMarkdown não encontrado para '", tipo_nome,
+                "' (empresa '", distro_rmd_check, "'): ", caminho_tipo,
+                ". Essa opção falhará se for selecionada até o arquivo ",
+                "ser adicionado."
+            )
+        }
+    }
+
+    logo_path_check <- obter_logo_path(distro_rmd_check)
+
+    if (!file.exists(logo_path_check)) {
+        warning(
+            "Logo não encontrada para a empresa '", distro_rmd_check,
+            "' em: ", logo_path_check,
+            ". A certidão dessa empresa poderá ser gerada sem o logotipo."
         )
     }
 }
-
-LOGO_PATH <- file.path(ASSETS_DIR, "logo_mpro.png")
-
-if (!file.exists(LOGO_PATH)) {
-    warning(
-        "Logo não encontrada em: ", LOGO_PATH,
-        ". A certidão poderá ser gerada sem o logotipo."
-    )
-}
+rm(distro_rmd_check)
 
 # =========================================================================
 # LOGO DA TELA DE LOGIN
@@ -225,6 +280,31 @@ if (!file.exists(LOGIN_LOGO_PATH)) {
     warning(
         "Logo da tela de login não encontrada em: ", LOGIN_LOGO_PATH,
         ". A tela de login será exibida sem a logo."
+    )
+}
+
+# =========================================================================
+# LOGO HORIZONTAL DO CABEÇALHO (substitui o texto "Certidão")
+# =========================================================================
+HEADER_LOGO_PATH <- file.path(IMG_DIR, "declaraserv_logo_horizontal.png")
+
+if (!file.exists(HEADER_LOGO_PATH)) {
+    warning(
+        "Logo horizontal não encontrada em: ", HEADER_LOGO_PATH,
+        ". O cabeçalho da tela principal será exibido sem a logo."
+    )
+}
+
+# =========================================================================
+# README.md — exibido em janela modal a partir da tela principal
+# =========================================================================
+README_PATH <- file.path(APP_DIR, "README.md")
+
+if (!file.exists(README_PATH)) {
+    warning(
+        "Arquivo README.md não encontrado em: ", README_PATH,
+        ". O botão de ajuda exibirá uma mensagem informando que o ",
+        "arquivo não está disponível."
     )
 }
 
@@ -393,6 +473,35 @@ sanitizar_nome_arquivo <- function(texto) {
 }
 
 # =========================================================================
+# NÚMERO DA CERTIDÃO (gerado automaticamente)
+# -------------------------------------------------------------------------
+# Código de 11 dígitos = quantidade de segundos entre 01/01/2025 00:00:00
+# (horário de Maceió) e o instante da geração. Esse mesmo código pode ser
+# revertido de volta para a data/hora exata (ver recuperar_data_hora11()
+# na aba "Validação" de mod_totp_admin.R), funcionando como um "número de
+# série" verificável da certidão.
+# =========================================================================
+gerar_codigo_tempo11 <- function(data_hora = Sys.time()) {
+    data_base <- as.POSIXct(
+        "2025-01-01 00:00:00",
+        tz = "America/Maceio"
+    )
+    sprintf(
+        "%011d",
+        as.integer(
+            difftime(data_hora, data_base, units = "secs")
+        )
+    )
+}
+
+# Monta o número completo da certidão: {codigo11}/{ano}/DIGEPE.
+gerar_numero_certidao <- function(data_hora = Sys.time()) {
+    codigo <- gerar_codigo_tempo11(data_hora)
+    ano <- format(data_hora, "%Y")
+    glue("{codigo}/{ano}/DIGEPE")
+}
+
+# =========================================================================
 # CONTEÚDO PRINCIPAL (CERTIDÃO) — mesma funcionalidade do app.R original,
 # agora exibida dentro da tela autenticada.
 # =========================================================================
@@ -446,6 +555,10 @@ painel_certidao_ui <- function() {
 
         br(),
 
+        uiOutput("numero_certidao_gerado_ui"),
+
+        br(),
+
         uiOutput("tempo_processamento"),
 
         br(),
@@ -483,6 +596,13 @@ ui <- fluidPage(
                 margin-top: 20px;
                 margin-bottom: 4px;
                 font-weight: 600;
+            }
+
+            .app-title .logo-horizontal {
+                display: block;
+                max-width: 280px;
+                width: 100%;
+                height: auto;
             }
 
             .app-subtitle {
@@ -720,7 +840,7 @@ ui <- fluidPage(
 
             .header-container {
                 overflow: hidden;
-                max-height: 260px;
+                max-height: 320px;
                 opacity: 1;
                 transition: max-height .28s ease,
                             opacity .2s ease,
@@ -732,6 +852,44 @@ ui <- fluidPage(
                 max-height: 0;
                 opacity: 0;
                 margin-bottom: 0;
+            }
+
+            .header-info {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                column-gap: 28px;
+                row-gap: 14px;
+                align-items: start;
+                width: 100%;
+                color: #555;
+            }
+
+            .header-info .info-foto {
+                grid-column: 1 / -1;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+
+            .header-info .info-item {
+                min-width: 0;
+            }
+
+            .header-info .info-label {
+                display: block;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+                color: #8a8f98;
+                margin-bottom: 2px;
+            }
+
+            .header-info .info-value {
+                display: block;
+                font-size: 14px;
+                color: #333;
+                word-break: break-word;
             }
 
         ")),
@@ -870,17 +1028,40 @@ server <- function(input, output, session) {
     # que decide qual banco IRIS é consultado em consultar_matricula().
     distroSelecionado <- reactiveVal(NULL)
 
+    # Templates de certidão e logo da empresa atualmente logada — dependem
+    # da subpasta "rmark/<empresa>/" e "assets/<empresa>/logo.png" (ver
+    # obter_certidao_tipos()/obter_logo_path() definidos no topo do app.R).
+    certidaoTiposAtual <- reactive({
+        req(distroSelecionado())
+        obter_certidao_tipos(distroSelecionado())
+    })
+
+    logoPathAtual <- reactive({
+        req(distroSelecionado())
+        obter_logo_path(distroSelecionado())
+    })
+
     # ===================================================
     # ESTADO DO CABEÇALHO
     # ===================================================
 
-    header_oculto <- reactiveVal(FALSE)
+    # Começa oculto: logo após um login bem-sucedido, o bloco de
+    # informações do usuário deve iniciar escondido (usuário usa o botão
+    # "Mostrar/ocultar informações do usuário" para exibi-lo).
+    header_oculto <- reactiveVal(TRUE)
 
     # ===================================================
     # ABA SELECIONADA
     # ===================================================
 
-    menuSelecionado <- reactiveVal("Certidão MPRO")
+    menuSelecionado <- reactiveVal("Certidão")
+
+    # Incrementado a cada logout — sinaliza para mod_totp_admin_server()
+    # limpar seu estado interno (chave recém-gerada, campos do formulário),
+    # já que o módulo é iniciado uma única vez por sessão do navegador e,
+    # sem isso, essas informações ficariam visíveis para quem fizer login
+    # em seguida na mesma aba/sessão.
+    resetarAdminTotp <- reactiveVal(0)
 
     # ===================================================
     # ESTADO DA CERTIDÃO (do app.R original)
@@ -890,12 +1071,14 @@ server <- function(input, output, session) {
     dados_consulta <- reactiveVal(NULL)
     matricula_consultada <- reactiveVal(NULL)
     tempo_geracao <- reactiveVal(NULL)
+    numero_certidao_gerado <- reactiveVal(NULL)
 
     limpar_estado_certidao <- function() {
         dados_consulta(NULL)
         matricula_consultada(NULL)
         html_path(NULL)
         tempo_geracao(NULL)
+        numero_certidao_gerado(NULL)
     }
 
     validar_matricula <- function(matricula_txt) {
@@ -965,9 +1148,17 @@ server <- function(input, output, session) {
 
     observeEvent(input$entrar, {
 
-        req(input$usuario, input$senha, input$distro_ad)
+        req(input$usuario, input$senha)
 
         distro_escolhida <- input$distro_ad
+
+        if (is.null(distro_escolhida) || trimws(distro_escolhida) == "") {
+            showNotification(
+                "Selecione uma empresa válida antes de continuar.",
+                type = "warning"
+            )
+            return(invisible(NULL))
+        }
 
         # Defesa extra: o <select> já restringe as opções no navegador,
         # mas nada impede uma requisição manipulada tentando mandar um
@@ -1007,12 +1198,15 @@ server <- function(input, output, session) {
             fotoUsuario(obter_foto_usuario(dados))
             metodoAutenticado("AD")
             distroSelecionado(distro_escolhida)
-            menuSelecionado("Certidão MPRO")
+            menuSelecionado("Certidão")
+
+            # Inicia com as informações do usuário escondidas.
+            header_oculto(TRUE)
 
             updateTabsetPanel(
                 session,
                 "menu",
-                selected = "Certidão MPRO"
+                selected = "Certidão"
             )
 
             showNotification(
@@ -1065,12 +1259,15 @@ server <- function(input, output, session) {
             fotoUsuario(NULL)
             metodoAutenticado("TOTP")
             distroSelecionado(dados$distro)
-            menuSelecionado("Certidão MPRO")
+            menuSelecionado("Certidão")
+
+            # Inicia com as informações do usuário escondidas.
+            header_oculto(TRUE)
 
             updateTabsetPanel(
                 session,
                 "menu",
-                selected = "Certidão MPRO"
+                selected = "Certidão"
             )
 
             showNotification(
@@ -1102,12 +1299,16 @@ server <- function(input, output, session) {
         metodoAutenticado(NULL)
         metodoAcesso(NULL)
         distroSelecionado(NULL)
-        menuSelecionado("Certidão MPRO")
+        menuSelecionado("Certidão")
 
         # Dados da certidão são de uma pessoa específica; ao sair, não
         # devem ficar disponíveis para quem fizer login a seguir na
         # mesma aba/sessão do navegador.
         limpar_estado_certidao()
+
+        # Idem para o formulário/chave TOTP recém-gerada (ver
+        # mod_totp_admin_server() e o comentário em resetarAdminTotp acima).
+        resetarAdminTotp(resetarAdminTotp() + 1)
 
     }, ignoreInit = TRUE)
 
@@ -1122,6 +1323,42 @@ server <- function(input, output, session) {
         session$sendCustomMessage(
             "toggle-header",
             list(oculto = header_oculto())
+        )
+
+    }, ignoreInit = TRUE)
+
+    # ---------------------------------------------------------------------
+    # README (janela modal)
+    # ---------------------------------------------------------------------
+
+    observeEvent(input$mostrar_readme, {
+
+        conteudo_modal <- if (file.exists(README_PATH)) {
+
+            texto_readme <- paste(
+                readLines(README_PATH, warn = FALSE, encoding = "UTF-8"),
+                collapse = "\n"
+            )
+
+            shiny::markdown(texto_readme)
+
+        } else {
+
+            div(
+                style = "color:#842029;",
+                "Arquivo README.md não encontrado em: ", README_PATH
+            )
+
+        }
+
+        showModal(
+            modalDialog(
+                title = "README",
+                conteudo_modal,
+                easyClose = TRUE,
+                size = "l",
+                footer = modalButton("Fechar")
+            )
         )
 
     }, ignoreInit = TRUE)
@@ -1227,8 +1464,11 @@ server <- function(input, output, session) {
                             selectInput(
                                 "distro_ad",
                                 "Empresa / Unidade",
-                                choices = DISTROS_DISPONIVEIS,
-                                selected = if (length(DISTROS_DISPONIVEIS) > 0) DISTROS_DISPONIVEIS[1] else NULL,
+                                choices = c(
+                                    "Selecione uma empresa" = "",
+                                    DISTROS_DISPONIVEIS
+                                ),
+                                selected = "",
                                 width = "100%"
                             )
                         ),
@@ -1327,6 +1567,13 @@ server <- function(input, output, session) {
                 ),
 
                 actionLink(
+                    "mostrar_readme",
+                    icon("circle-info"),
+                    class = "icon-btn",
+                    title = "Ver instruções (README)"
+                ),
+
+                actionLink(
                     "sair",
                     icon("power-off"),
                     class = "icon-btn sair",
@@ -1349,50 +1596,84 @@ server <- function(input, output, session) {
 
                 div(
 
-                    class = "header-container",
+                    class = paste(
+                        "header-container",
+                        if (isolate(header_oculto())) "collapsed" else ""
+                    ),
 
-                    div(class = "app-title", h3("Certidão")),
+                    div(
+                        class = "app-title",
+                        tags$img(
+                            src = "img/declaraserv_logo_horizontal.png",
+                            class = "logo-horizontal",
+                            alt = "DeclaraServ"
+                        )
+                    ),
 
                     if (identical(metodoAutenticado(), "AD")) {
 
                         tags$div(
 
-                            style = "color:#555;",
+                            class = "header-info",
 
                             if (!is.null(fotoUsuario())) {
-                                tags$img(src = fotoUsuario(), class = "foto-usuario mb-2")
+                                div(
+                                    class = "info-item info-foto",
+                                    tags$img(src = fotoUsuario(), class = "foto-usuario")
+                                )
                             },
 
-                            tags$b("Usuário: "),
-                            obter_campo(dadosUsuario(), "displayName"),
-                            br(),
-
-                            tags$b("Departamento: "),
-                            obter_campo(dadosUsuario(), "department"),
-                            br(),
-
-                            tags$b("Criado em: "),
-                            formatar_whenCreated(
-                                obter_campo(dadosUsuario(), "whenCreated")
+                            div(
+                                class = "info-item",
+                                tags$span("Usuário", class = "info-label"),
+                                tags$span(obter_campo(dadosUsuario(), "displayName"), class = "info-value")
                             ),
-                            br(),
 
-                            tags$b("Último acesso: "),
-                            formatar_lastLogon(
-                                obter_campo(dadosUsuario(), "lastLogonTimestamp")
+                            div(
+                                class = "info-item",
+                                tags$span("Departamento", class = "info-label"),
+                                tags$span(obter_campo(dadosUsuario(), "department"), class = "info-value")
                             ),
-                            br(),
 
-                            tags$b("Gestor: "),
-                            extrair_manager(dadosUsuario()$manager),
-                            br(),
+                            div(
+                                class = "info-item",
+                                tags$span("Criado em", class = "info-label"),
+                                tags$span(
+                                    formatar_whenCreated(
+                                        obter_campo(dadosUsuario(), "whenCreated")
+                                    ),
+                                    class = "info-value"
+                                )
+                            ),
 
-                            tags$b("Empresa: "),
-                            distroSelecionado(),
-                            br(),
+                            div(
+                                class = "info-item",
+                                tags$span("Último acesso", class = "info-label"),
+                                tags$span(
+                                    formatar_lastLogon(
+                                        obter_campo(dadosUsuario(), "lastLogonTimestamp")
+                                    ),
+                                    class = "info-value"
+                                )
+                            ),
 
-                            tags$b("Método de acesso: "),
-                            "Login Corporativo (AD)"
+                            div(
+                                class = "info-item",
+                                tags$span("Gestor", class = "info-label"),
+                                tags$span(extrair_manager(dadosUsuario()$manager), class = "info-value")
+                            ),
+
+                            div(
+                                class = "info-item",
+                                tags$span("Empresa", class = "info-label"),
+                                tags$span(distroSelecionado(), class = "info-value")
+                            ),
+
+                            div(
+                                class = "info-item",
+                                tags$span("Método de acesso", class = "info-label"),
+                                tags$span("Login Corporativo (AD)", class = "info-value")
+                            )
 
                         )
 
@@ -1400,22 +1681,31 @@ server <- function(input, output, session) {
 
                         tags$div(
 
-                            style = "color:#555;",
+                            class = "header-info",
 
-                            tags$b("Usuário: "),
-                            dadosUsuario()$displayName,
-                            br(),
+                            div(
+                                class = "info-item",
+                                tags$span("Usuário", class = "info-label"),
+                                tags$span(dadosUsuario()$displayName, class = "info-value")
+                            ),
 
-                            tags$b("Login: "),
-                            dadosUsuario()$login,
-                            br(),
+                            div(
+                                class = "info-item",
+                                tags$span("Login", class = "info-label"),
+                                tags$span(dadosUsuario()$login, class = "info-value")
+                            ),
 
-                            tags$b("Empresa: "),
-                            distroSelecionado(),
-                            br(),
+                            div(
+                                class = "info-item",
+                                tags$span("Empresa", class = "info-label"),
+                                tags$span(distroSelecionado(), class = "info-value")
+                            ),
 
-                            tags$b("Método de acesso: "),
-                            "Código Authenticator (TOTP)"
+                            div(
+                                class = "info-item",
+                                tags$span("Método de acesso", class = "info-label"),
+                                tags$span("Código Authenticator (TOTP)", class = "info-value")
+                            )
 
                         )
 
@@ -1437,7 +1727,7 @@ server <- function(input, output, session) {
                             selected = isolate(menuSelecionado())
                         ),
                         list(
-                            nav_panel("Certidão MPRO", painel_certidao_ui())
+                            nav_panel("Certidão", painel_certidao_ui())
                         ),
                         if (identical(metodoAutenticado(), "AD")) {
                             list(
@@ -1564,17 +1854,14 @@ server <- function(input, output, session) {
     output$selecao_certidao <- renderUI({
         req(dados_consulta())
 
+        certidao_tipos_atual <- certidaoTiposAtual()
+
         tagList(
             selectInput(
                 inputId = "tipo_certidao",
                 label = "Tipo de certidão",
-                choices = names(CERTIDAO_TIPOS),
-                selected = names(CERTIDAO_TIPOS)[1]
-            ),
-            textInput(
-                inputId = "numero_certidao",
-                label = "Número da certidão",
-                placeholder = "Ex.: 61/2026/DGP"
+                choices = names(certidao_tipos_atual),
+                selected = names(certidao_tipos_atual)[1]
             )
         )
     })
@@ -1600,29 +1887,18 @@ server <- function(input, output, session) {
         tipo_selecionado <- input$tipo_certidao
         req(tipo_selecionado)
 
-        numero_certidao <- input$numero_certidao
-        if (is.null(numero_certidao)) {
-            numero_certidao <- ""
-        }
-        numero_certidao <- trimws(numero_certidao)
+        # Número da certidão gerado automaticamente no momento da geração
+        # (ver gerar_numero_certidao()/gerar_codigo_tempo11() acima). Só é
+        # exposto para exibição (numero_certidao_gerado) se a geração for
+        # bem-sucedida, mais abaixo.
+        numero_certidao <- gerar_numero_certidao()
 
-        if (numero_certidao == "") {
-            showModal(
-                modalDialog(
-                    title = "Número da certidão obrigatório",
-                    "Informe o número da certidão (ex.: 61/2026/DGP) antes de gerar.",
-                    easyClose = TRUE,
-                    footer = modalButton("Fechar")
-                )
-            )
-            return(invisible(NULL))
-        }
-
-        rmd_arquivo <- CERTIDAO_TIPOS[[tipo_selecionado]]
+        rmd_arquivo <- certidaoTiposAtual()[[tipo_selecionado]]
         rmd_path_selecionado <- rmd_arquivo
 
         html_path(NULL)
         tempo_geracao(NULL)
+        numero_certidao_gerado(NULL)
 
         if (!file.exists(rmd_path_selecionado)) {
             showModal(
@@ -1685,7 +1961,8 @@ server <- function(input, output, session) {
                             params = list(
                                 matricula = matricula_num,
                                 numero_certidao = numero_certidao,
-                                logo_path = LOGO_PATH
+                                logo_path = logoPathAtual(),
+                                distro = distroSelecionado()
                             ),
                             envir = new.env(parent = globalenv()),
                             knit_root_dir = APP_DIR,
@@ -1754,8 +2031,22 @@ server <- function(input, output, session) {
 
                 if (!is.null(saida)) {
                     html_path(saida)
+                    numero_certidao_gerado(numero_certidao)
                 }
             }
+        )
+    })
+
+    # ---------------------------------------------------------------------
+    # NÚMERO DA CERTIDÃO (gerado automaticamente)
+    # ---------------------------------------------------------------------
+    output$numero_certidao_gerado_ui <- renderUI({
+        req(numero_certidao_gerado())
+
+        tags$div(
+            style = "color:#333; font-size: 14px; margin-bottom: 8px;",
+            tags$b("Número da certidão: "),
+            tags$code(numero_certidao_gerado())
         )
     })
 
@@ -1832,7 +2123,8 @@ server <- function(input, output, session) {
     mod_totp_admin_server(
         "totp_admin",
         con = con,
-        ativo = reactive(menuSelecionado() == "Administração TOTP")
+        ativo = reactive(menuSelecionado() == "Administração TOTP"),
+        resetar = resetarAdminTotp
     )
 }
 

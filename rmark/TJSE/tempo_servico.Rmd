@@ -1,0 +1,599 @@
+---
+title: ""
+output: 
+  html_document:
+    self_contained: true
+params:
+  matricula: "12345"
+  numero_certidao: "0000/2026"
+  unidade_administrativa: "DIRETORIA-GERAL DE PESSOAL"
+  numero_processo: ""
+  codigo_validacao: ""
+  logo_path: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# =========================================================================
+# .Renviron — carregamento explícito
+# -------------------------------------------------------------------------
+# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R), as
+# variáveis de ambiente já carregadas pelo app.R estão disponíveis aqui.
+# Mas para permitir renderizar/testar este .Rmd isoladamente (fora do
+# Shiny), carregamos o .Renviron da pasta do projeto explicitamente também.
+# =========================================================================
+renviron_path <- file.path(getwd(), ".Renviron")
+
+if (file.exists(renviron_path)) {
+  readRenviron(renviron_path)
+}
+
+# Lê uma variável de ambiente obrigatória; interrompe a renderização com
+# mensagem clara caso ela não esteja definida no .Renviron.
+obter_env_obrigatoria <- function(nome_var) {
+  valor <- Sys.getenv(nome_var, unset = "")
+
+  if (valor == "") {
+    stop(
+      "Variável de ambiente obrigatória não definida: ", nome_var,
+      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
+    )
+  }
+
+  valor
+}
+
+# =========================================================================
+# PACOTES
+# =========================================================================
+library(DBI)
+library(rJava)
+library(RJDBC)
+library(glue)
+library(stringr)
+library(base64enc)
+
+# =========================================================================
+# CONEXÃO COM O IRIS
+# -------------------------------------------------------------------------
+# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
+# .Renviron — sem valores padrão hardcoded no código.
+# =========================================================================
+Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+
+driver_class <- Sys.getenv(
+  "MPRO_IRIS_DRIVER_CLASS",
+  unset = "com.intersystems.jdbc.IRISDriver"
+)
+
+jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
+url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
+iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
+iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
+
+if (!file.exists(jar_path)) {
+  stop(
+    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
+    ". Verifique o caminho configurado no .Renviron para este ",
+    "servidor/ambiente."
+  )
+}
+
+drv <- JDBC(
+  driverClass = driver_class,
+  classPath = jar_path
+)
+
+con <- dbConnect(
+  drv,
+  url,
+  user = iris_user,
+  password = iris_pass
+)
+
+# =========================================================================
+# CONSULTA — Períodos de exercício (RHCadMovimentacao)
+# =========================================================================
+matricula_sql <- as.integer(params$matricula)
+
+if (is.na(matricula_sql)) {
+  stop("Por favor, informe uma matrícula válida no parâmetro 'matricula'.")
+}
+
+query <- glue("
+SELECT
+    Servidor->Nome AS NOME,
+    Servidor->Pessoa->CpfFormatado AS CPF,
+    Servidor->Matricula AS MATRICULA,
+    DataFormatada AS DATAINICIO,
+    DataFimFormatada AS DATAFIM,
+    Dias AS DIAS,
+    FLOOR(Dias / 365) AS ANOS,
+    FLOOR(MOD(Dias, 365) / 30) AS MESES,
+    MOD(MOD(Dias, 365), 30) AS DIAS_RESTANTES,
+    FLOOR(Dias / 365) || ' anos, ' ||
+    FLOOR(MOD(Dias, 365) / 30) || ' meses, ' ||
+    MOD(MOD(Dias, 365), 30) || ' dias' AS TEMPO,
+    YEAR(Data) AS PERIODO,
+    Servidor->Funcional->CargoEfetivo->Descricao AS CARGOFUNCAO,
+    Exercicio->Descricao AS UNIDADE,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
+FROM
+    RHCadMovimentacao
+WHERE
+    Servidor->Matricula = {matricula_sql}
+ORDER BY
+    Data
+")
+
+periodos <- dbGetQuery(con, query)
+
+# =========================================================================
+# CONSULTA 2 — Dados do gestor da lotação DGP (RHTabLotacao)
+# =========================================================================
+query_gestor <- "
+SELECT
+    Gestor->Nome AS GESTOR_NOME,
+    Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Gestor->Matricula AS GESTOR_MATRICULA,
+    Email AS EMAIL,
+    TelefonePrincipal AS TELEFONE
+FROM
+    RHTabLotacao
+WHERE
+    Sigla = 'DGP'
+"
+
+dados_gestor <- tryCatch(
+  dbGetQuery(con, query_gestor),
+  error = function(e) {
+    warning("Falha ao consultar RHTabLotacao: ", conditionMessage(e))
+    data.frame(
+      GESTOR_NOME = NA, GESTOR_CARGO = NA, GESTOR_MATRICULA = NA,
+      EMAIL = NA, TELEFONE = NA,
+      stringsAsFactors = FALSE
+    )
+  }
+)
+
+# Usa apenas o primeiro registro retornado
+if (nrow(dados_gestor) > 0) {
+  dados_gestor <- dados_gestor[1, ]
+}
+
+dbDisconnect(con)
+
+if (nrow(periodos) == 0) {
+  stop(
+    glue(
+      "Nenhum período de exercício encontrado em RHCadMovimentacao para a matrícula {matricula_sql}."
+    )
+  )
+}
+
+# Dados de cabeçalho (nome, CPF, matrícula, gestor) — a mesma para todas as
+# linhas retornadas, então usamos a primeira.
+dados <- periodos[1, ]
+
+# =========================================================================
+# FUNÇÕES DE FORMATAÇÃO
+# -------------------------------------------------------------------------
+# Todas as funções abaixo são defensivas contra vetores com mais de um
+# elemento: quando dbGetQuery() retorna múltiplas linhas, um valor de
+# coluna passado inteiro (sem vapply/mapply) para um `if()` provoca o
+# erro "'length = N' em coerção a 'logical(1)'" nas versões mais
+# recentes do R (>= 4.3). Para evitar isso em qualquer ponto do código,
+# cada função reduz `x` ao primeiro elemento antes de qualquer `if`.
+# =========================================================================
+meses_pt <- c(
+  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+)
+
+parse_data <- function(x) {
+  if (length(x) == 0) return(as.Date(NA))
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x) || trimws(as.character(x)) == "") {
+    return(as.Date(NA))
+  }
+  if (inherits(x, "Date")) return(as.Date(x))
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+
+  x <- trimws(as.character(x))
+  formatos <- c("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y")
+
+  for (fmt in formatos) {
+    resultado <- suppressWarnings(as.Date(x, format = fmt))
+    if (!is.na(resultado)) return(resultado)
+  }
+
+  resultado <- suppressWarnings(as.Date(x))
+  if (!is.na(resultado)) return(resultado)
+
+  stop("Não foi possível interpretar a data: ", x)
+}
+
+formatar_data_curta <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  format(d, "%d/%m/%Y")
+}
+
+formatar_data_extenso <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  glue("{format(d, '%d')} de {meses_pt[as.integer(format(d, '%m'))]} de {format(d, '%Y')}")
+}
+
+clean_html <- function(x) {
+  if (length(x) == 0) return("")
+  if (length(x) > 1) x <- x[1]
+  if (is.na(x)) return("")
+  as.character(x)
+}
+
+clean_num <- function(x) {
+  if (length(x) == 0) return(NA_real_)
+  if (length(x) > 1) x <- x[1]
+  suppressWarnings(as.numeric(x))
+}
+
+# Converte um total de dias em texto "X anos, Y meses, Z dias", seguindo
+# a mesma convenção (ano = 365 dias, mês = 30 dias) usada no campo TEMPO
+# calculado na consulta SQL, para manter os totais consistentes com o
+# que vem por linha do banco.
+dias_para_texto <- function(dias) {
+  dias <- clean_num(dias)
+  if (is.na(dias)) return("")
+  dias <- abs(as.integer(round(dias)))
+  anos <- dias %/% 365
+  meses <- (dias %% 365) %/% 30
+  dias_restantes <- (dias %% 365) %% 30
+  glue("{anos} anos, {meses} meses, {dias_restantes} dias")
+}
+
+# =========================================================================
+# CAMPOS — Cabeçalho
+# =========================================================================
+nome      <- clean_html(str_to_upper(as.character(dados$NOME)))
+cpf       <- clean_html(dados$CPF)
+matricula <- clean_html(dados$MATRICULA)
+
+gestor    <- clean_html(dados$GESTOR_NOME)
+cargogestor     <- clean_html(dados$GESTOR_CARGO)
+matriculagestor <- clean_html(dados$GESTOR_MATRICULA)
+
+gestordgp        <- clean_html(dados_gestor$GESTOR_NOME)
+cargogestordgp   <- clean_html(dados_gestor$GESTOR_CARGO)
+matriculagestordgp <- clean_html(dados_gestor$GESTOR_MATRICULA)
+emailgestordgp   <- clean_html(dados_gestor$EMAIL)
+telefonegestordgp <- clean_html(dados_gestor$TELEFONE)
+
+numero_certidao <- clean_html(params$numero_certidao)
+unidade_administrativa <- clean_html(params$unidade_administrativa)
+numero_processo <- clean_html(params$numero_processo)
+codigo_validacao <- clean_html(params$codigo_validacao)
+datahoje <- formatar_data_extenso(Sys.Date())
+data_corte <- formatar_data_curta(Sys.Date())
+
+# =========================================================================
+# TABELA — Períodos de exercício
+# =========================================================================
+periodos$DATAINICIO_FMT  <- vapply(periodos$DATAINICIO, formatar_data_curta, character(1))
+periodos$DATAFIM_FMT     <- vapply(periodos$DATAFIM, formatar_data_curta, character(1))
+periodos$CARGOFUNCAO_FMT <- vapply(periodos$CARGOFUNCAO, clean_html, character(1))
+periodos$UNIDADE_FMT     <- vapply(periodos$UNIDADE, clean_html, character(1))
+periodos$TEMPO_FMT       <- vapply(periodos$TEMPO, clean_html, character(1))
+periodos$DIAS_NUM        <- vapply(periodos$DIAS, clean_num, numeric(1))
+
+# =========================================================================
+# TEMPO TOTAL
+# -------------------------------------------------------------------------
+# Tempo bruto: soma de todos os períodos com dias positivos (efetivo
+# exercício). Períodos descontados: soma dos períodos com dias
+# negativos (ex.: afastamentos/licenças não computadas), quando
+# existirem no retorno da consulta. Tempo líquido: bruto - descontado,
+# equivalente ao somatório algébrico de todos os dias.
+# =========================================================================
+dias_validos <- periodos$DIAS_NUM[!is.na(periodos$DIAS_NUM)]
+
+dias_bruto      <- sum(dias_validos[dias_validos > 0])
+dias_descontado <- sum(abs(dias_validos[dias_validos < 0]))
+dias_liquido     <- dias_bruto - dias_descontado
+
+tempo_bruto_texto      <- dias_para_texto(dias_bruto)
+tempo_descontado_texto <- if (dias_descontado > 0) dias_para_texto(dias_descontado) else ""
+tempo_liquido_texto    <- dias_para_texto(dias_liquido)
+
+# =========================================================================
+# LOGOTIPO
+# =========================================================================
+logo_path <- as.character(params$logo_path)
+if (is.na(logo_path) || logo_path == "") {
+  logo_path <- file.path(getwd(), "assets", "logo_mpro.png")
+}
+
+logo_base64 <- ""
+if (file.exists(logo_path)) {
+  logo_bytes <- readBin(logo_path, "raw", file.info(logo_path)$size)
+  logo_base64 <- paste0("data:image/png;base64,", base64enc::base64encode(logo_bytes))
+}
+```
+
+```{css, echo=FALSE}
+body {
+  font-family: "Georgia", "Times New Roman", serif;
+  color: #1a1a1a;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px;
+  line-height: 1.6;
+}
+
+.certidao-cabecalho {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.certidao-cabecalho img {
+  max-height: 90px;
+  margin-bottom: 12px;
+}
+
+.certidao-cabecalho h1 {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 4px 0;
+}
+
+.certidao-cabecalho h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #444;
+  margin: 2px 0;
+}
+
+.certidao-cabecalho h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  margin: 2px 0 24px 0;
+}
+
+.certidao-titulo {
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 24px 0;
+}
+
+.certidao-corpo {
+  text-align: justify;
+  font-size: 15px;
+  margin-bottom: 24px;
+}
+
+.certidao-corpo p {
+  margin-bottom: 16px;
+}
+
+.certidao-secao h4 {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 4px;
+  margin: 28px 0 12px 0;
+}
+
+.tabela-periodos {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 16px 0 24px 0;
+}
+
+.tabela-periodos th,
+.tabela-periodos td {
+  border: 1px solid #ccc;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.tabela-periodos th {
+  background-color: #f2f2f2;
+  font-weight: 700;
+}
+
+.tabela-periodos td.numero {
+  text-align: right;
+}
+
+.tempo-total {
+  font-size: 14px;
+  margin: 8px 0 20px 0;
+}
+
+.tempo-total dt {
+  font-weight: 700;
+  margin-top: 8px;
+}
+
+.tempo-total dd {
+  margin: 2px 0 0 0;
+}
+
+.certidao-aviso {
+  font-size: 13px;
+  font-style: italic;
+  margin: 16px 0;
+}
+
+.certidao-rodape {
+  margin-top: 40px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura {
+  margin-top: 64px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura .linha {
+  display: inline-block;
+  border-top: 1px solid #1a1a1a;
+  padding-top: 6px;
+  min-width: 320px;
+}
+
+.certidao-validacao {
+  margin-top: 32px;
+  font-size: 12px;
+  color: #555;
+  text-align: center;
+  line-height: 1.8;
+}
+```
+
+<div class="certidao-cabecalho">
+```{r logo-html, results='asis'}
+if (logo_base64 != "") {
+  cat(glue('<img src="{logo_base64}" alt="Logo MPRO" />'))
+}
+```
+<h1>Ministério Público do Estado de Rondônia</h1>
+<h2>Procuradoria-Geral de Justiça</h2>
+<h3>`r unidade_administrativa`</h3>
+</div>
+
+<div class="certidao-titulo">
+Declaração de Tempo de Serviço nº `r numero_certidao`
+</div>
+
+<div class="certidao-corpo">
+
+<p>
+Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF nº
+<strong>`r cpf`</strong>, matrícula nº <strong>`r matricula`</strong>,
+exerceu/exerce suas atividades funcionais junto ao <strong>Ministério
+Público do Estado de Rondônia – MPRO</strong>, conforme os registros
+constantes de seus assentamentos funcionais.
+</p>
+
+</div>
+
+<div class="certidao-secao">
+<h4>1. Períodos de exercício</h4>
+
+```{r tabela-periodos, results='asis'}
+cat('<table class="tabela-periodos">')
+cat('<thead><tr><th>Período</th><th>Cargo/Função</th><th>Unidade</th><th style="text-align:right;">Tempo Parcial</th></tr></thead>')
+cat('<tbody>')
+for (i in seq_len(nrow(periodos))) {
+  fim_txt <- if (periodos$DATAFIM_FMT[i] == "") "em curso" else periodos$DATAFIM_FMT[i]
+  periodo <- glue("{periodos$DATAINICIO_FMT[i]} a {fim_txt}")
+  cat(glue(
+    "<tr><td>{periodo}</td>",
+    "<td>{periodos$CARGOFUNCAO_FMT[i]}</td>",
+    "<td>{periodos$UNIDADE_FMT[i]}</td>",
+    "<td class='numero'>{periodos$TEMPO_FMT[i]}</td></tr>"
+  ))
+}
+cat('</tbody></table>')
+```
+
+</div>
+
+<div class="certidao-secao">
+<h4>2. Tempo total</h4>
+
+<div class="certidao-corpo">
+<p>
+Considerando os períodos acima registrados, o(a) servidor(a) possui:
+</p>
+</div>
+
+<dl class="tempo-total">
+<dt>Tempo bruto de vínculo/serviço:</dt>
+<dd>`r tempo_bruto_texto`</dd>
+
+```{r descontado, results='asis'}
+if (tempo_descontado_texto != "") {
+  cat(glue(
+    "<dt>Períodos descontados:</dt><dd>{tempo_descontado_texto}</dd>"
+  ))
+}
+```
+
+<dt>Tempo líquido de efetivo exercício:</dt>
+<dd>`r tempo_liquido_texto`</dd>
+</dl>
+
+<div class="certidao-corpo">
+<p>
+O presente documento baseia-se nos registros constantes
+disponíveis até <strong>`r data_corte`</strong>, observadas as regras
+administrativas aplicáveis ao conceito de tempo de serviço/efetivo
+exercício.
+</p>
+
+<p class="certidao-aviso">
+A presente declaração <strong>não substitui Certidão de Tempo de
+Contribuição – CTC</strong>, quando esta for exigida para fins
+previdenciários.
+</p>
+
+<p>
+A presente declaração é emitida a requerimento do(a) interessado(a), para fins de
+comprovação de tempo de serviço perante órgãos públicos, instituições
+privadas, concursos públicos, processos seletivos, instituições de
+ensino e demais finalidades legalmente admitidas.
+</p>
+</div>
+</div>
+
+<div class="certidao-rodape">
+<p>Porto Velho/RO, `r datahoje`.</p>
+</div>
+
+<div class="certidao-assinatura">
+<span class="linha">
+`r gestordgp`<br>`r cargogestordgp`<br>
+Ministério Público do Estado de Rondônia<br>
+Matrícula nº `r matriculagestordgp`<br>
+E-mail: `r emailgestordgp`<br>
+Telefone: `r telefonegestordgp`
+</span>
+</div>
+
+<p style="text-align:center; font-size:12px; margin-top:24px;">
+<strong>Documento assinado eletronicamente.</strong>
+</p>
+
+```{r validacao, results='asis'}
+linhas <- c()
+if (codigo_validacao != "") {
+  linhas <- c(linhas, glue("<strong>Código de validação:</strong> {codigo_validacao}"))
+}
+if (numero_processo != "") {
+  linhas <- c(linhas, glue("<strong>Processo/Requerimento nº:</strong> {numero_processo}"))
+}
+if (length(linhas) > 0) {
+  cat('<div class="certidao-validacao">')
+  cat(paste(linhas, collapse = "<br>"))
+  cat('</div>')
+}
+```

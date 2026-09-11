@@ -1,0 +1,407 @@
+---
+title: ""
+output: 
+  html_document:
+    self_contained: true
+params:
+  matricula: "12345"
+  numero_certidao: "001/2026"
+  logo_path: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# =========================================================================
+# .Renviron — carregamento explícito
+# -------------------------------------------------------------------------
+# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R), as
+# variáveis de ambiente já carregadas pelo app.R estão disponíveis aqui.
+# Mas para permitir renderizar/testar este .Rmd isoladamente (fora do
+# Shiny), carregamos o .Renviron da pasta do projeto explicitamente também.
+# =========================================================================
+renviron_path <- file.path(getwd(), ".Renviron")
+
+if (file.exists(renviron_path)) {
+  readRenviron(renviron_path)
+}
+
+# Lê uma variável de ambiente obrigatória; interrompe a renderização com
+# mensagem clara caso ela não esteja definida no .Renviron.
+obter_env_obrigatoria <- function(nome_var) {
+  valor <- Sys.getenv(nome_var, unset = "")
+
+  if (valor == "") {
+    stop(
+      "Variável de ambiente obrigatória não definida: ", nome_var,
+      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
+    )
+  }
+
+  valor
+}
+
+# =========================================================================
+# PACOTES
+# =========================================================================
+library(DBI)
+library(rJava)
+library(RJDBC)
+library(glue)
+library(stringr)
+library(base64enc)
+
+# =========================================================================
+# CONEXÃO COM O IRIS
+# -------------------------------------------------------------------------
+# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
+# .Renviron — sem valores padrão hardcoded no código.
+# =========================================================================
+Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+
+driver_class <- Sys.getenv(
+  "MPRO_IRIS_DRIVER_CLASS",
+  unset = "com.intersystems.jdbc.IRISDriver"
+)
+
+jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
+url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
+iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
+iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
+
+if (!file.exists(jar_path)) {
+  stop(
+    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
+    ". Verifique o caminho configurado no .Renviron para este ",
+    "servidor/ambiente."
+  )
+}
+
+drv <- JDBC(
+  driverClass = driver_class,
+  classPath = jar_path
+)
+
+con <- dbConnect(
+  drv,
+  url,
+  user = iris_user,
+  password = iris_pass
+)
+
+# =========================================================================
+# CONSULTA
+# =========================================================================
+matricula_sql <- as.integer(params$matricula)
+
+if (is.na(matricula_sql)) {
+  stop("Por favor, informe uma matrícula válida no parâmetro 'matricula'.")
+}
+
+query <- glue("
+SELECT TOP 1
+    Servidor->Nome AS NOME,
+    Servidor->Funcional->DataIngOrgaoFormatada AS DATAINICIO,
+    Servidor->Financeiro->DataDesligamento AS DATAFIM,
+    ProvDocumento_Tipo->Descricao AS PORTARIA_TIPO,
+    ProvDocumento_Numero AS PORTARIA_NUMERO,
+    TO_CHAR(ProvDocumento_DataDoc, 'DD/MM/YYYY') AS PORTARIA_DATA,
+    ProvDocumento_PublicacaoTipo->Descricao AS DIARIO_TIPO,
+    ProvDocumento_PublicacaoNumero AS DIARIO_NUMERO,
+    TO_CHAR(ProvDocumento_PublicacaoData, 'DD/MM/YYYY') AS DIARIO_DATA,
+    Servidor->Funcional->LotacaoExercicio->Descricao AS LOTACAO,
+    Servidor->Matricula AS MATRICULA,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
+FROM
+    RHCadCargoEfetivo
+WHERE
+    Servidor->MATRICULA = {matricula_sql}
+ORDER BY
+    ProvDocumento_DataDoc DESC
+")
+
+dados <- dbGetQuery(con, query)
+
+# =========================================================================
+# CONSULTA 2 — Dados do gestor da lotação DGP (RHTabLotacao)
+# =========================================================================
+query_gestor <- "
+SELECT
+    Gestor->Nome AS GESTOR_NOME,
+    Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
+    Gestor->Matricula AS GESTOR_MATRICULA,
+    Email AS EMAIL,
+    TelefonePrincipal AS TELEFONE
+FROM
+    RHTabLotacao
+WHERE
+    Sigla = 'DGP'
+"
+
+dados_gestor <- tryCatch(
+  dbGetQuery(con, query_gestor),
+  error = function(e) {
+    warning("Falha ao consultar RHTabLotacao: ", conditionMessage(e))
+    data.frame(
+      GESTOR_NOME = NA, GESTOR_CARGO = NA, GESTOR_MATRICULA = NA,
+      EMAIL = NA, TELEFONE = NA,
+      stringsAsFactors = FALSE
+    )
+  }
+)
+
+# Usa apenas o primeiro registro retornado
+if (nrow(dados_gestor) > 0) {
+  dados_gestor <- dados_gestor[1, ]
+}
+
+dbDisconnect(con)
+
+if (nrow(dados) == 0) {
+  stop(
+    glue(
+      "Nenhum registro encontrado para a matrícula {matricula_sql}."
+    )
+  )
+}
+
+dados <- dados[1, ]
+
+# =========================================================================
+# FUNÇÕES DE FORMATAÇÃO
+# =========================================================================
+meses_pt <- c(
+  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
+)
+
+parse_data <- function(x) {
+  if (length(x) == 0 || is.na(x) || trimws(as.character(x)) == "") {
+    return(as.Date(NA))
+  }
+  if (inherits(x, "Date")) return(as.Date(x))
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+
+  x <- trimws(as.character(x))
+  formatos <- c("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y")
+
+  for (fmt in formatos) {
+    resultado <- suppressWarnings(as.Date(x, format = fmt))
+    if (!is.na(resultado)) return(resultado)
+  }
+
+  resultado <- suppressWarnings(as.Date(x))
+  if (!is.na(resultado)) return(resultado)
+
+  stop("Não foi possível interpretar a data: ", x)
+}
+
+formatar_data_curta <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  format(d, "%d/%m/%Y")
+}
+
+formatar_data_extenso <- function(x) {
+  d <- parse_data(x)
+  if (is.na(d)) return("")
+  glue("{format(d, '%d')} de {meses_pt[as.integer(format(d, '%m'))]} de {format(d, '%Y')}")
+}
+
+clean_html <- function(x) {
+  if (length(x) == 0 || is.na(x)) return("")
+  as.character(x)
+}
+
+# =========================================================================
+# CAMPOS
+# =========================================================================
+nome <- clean_html(str_to_upper(as.character(dados$NOME)))
+datainicio <- formatar_data_curta(dados$DATAINICIO)
+datafim <- formatar_data_curta(dados$DATAFIM)
+portaria_tipo <- clean_html(dados$PORTARIA_TIPO)
+portaria_numero <- clean_html(dados$PORTARIA_NUMERO)
+portaria_data <- formatar_data_curta(dados$PORTARIA_DATA)
+diario_tipo <- clean_html(dados$DIARIO_TIPO)
+diario_numero <- clean_html(dados$DIARIO_NUMERO)
+datadiario <- formatar_data_curta(dados$DIARIO_DATA)
+lotacao <- clean_html(dados$LOTACAO)
+matricula <- clean_html(dados$MATRICULA)
+
+    # =====================================================================
+    # Dados do Gestor do Servidor
+    # =====================================================================
+    # gestor    <- clean_html(dados$GESTOR_NOME)
+    # cargogestor     <- clean_html(dados$GESTOR_CARGO)
+    # matriculagestor <- clean_html(dados$GESTOR_MATRICULA)
+
+gestor        <- clean_html(dados_gestor$GESTOR_NOME)
+cargogestor   <- clean_html(dados_gestor$GESTOR_CARGO)
+matriculagestor <- clean_html(dados_gestor$GESTOR_MATRICULA)
+emailgestor   <- clean_html(dados_gestor$EMAIL)
+telefonegestor <- clean_html(dados_gestor$TELEFONE)
+
+numero_certidao <- clean_html(params$numero_certidao)
+datahoje <- formatar_data_extenso(Sys.Date())
+
+dadosportaria <- if (portaria_tipo == "") {
+  glue("nº {portaria_numero}, de {portaria_data}")
+} else {
+  glue("{portaria_tipo} nº {portaria_numero}, de {portaria_data}")
+}
+
+diario <- if (diario_tipo == "") {
+  glue("Diário do MPRO nº {diario_numero}, de {datadiario}")
+} else {
+  glue("{diario_tipo} nº {diario_numero}, de {datadiario}")
+}
+
+# Texto do período: trata o caso de residência ainda em curso (sem data fim).
+periodo_texto <- if (datafim == "") {
+  glue("com início em {datainicio}, encontrando-se em curso na presente data")
+} else {
+  glue("no período de {datainicio} a {datafim}")
+}
+
+# =========================================================================
+# LOGOTIPO
+# =========================================================================
+logo_path <- as.character(params$logo_path)
+if (is.na(logo_path) || logo_path == "") {
+  logo_path <- file.path(getwd(), "assets", "logo_mpro.png")
+}
+
+logo_base64 <- ""
+if (file.exists(logo_path)) {
+  logo_bytes <- readBin(logo_path, "raw", file.info(logo_path)$size)
+  logo_base64 <- paste0("data:image/png;base64,", base64enc::base64encode(logo_bytes))
+}
+```
+
+```{css, echo=FALSE}
+body {
+  font-family: "Georgia", "Times New Roman", serif;
+  color: #1a1a1a;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px;
+  line-height: 1.6;
+}
+
+.certidao-cabecalho {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.certidao-cabecalho img {
+  max-height: 90px;
+  margin-bottom: 12px;
+}
+
+.certidao-cabecalho h1 {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin: 4px 0;
+}
+
+.certidao-cabecalho h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #444;
+  margin: 4px 0 24px 0;
+}
+
+.certidao-titulo {
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 24px 0;
+}
+
+.certidao-corpo {
+  text-align: justify;
+  font-size: 15px;
+  margin-bottom: 32px;
+}
+
+.certidao-corpo p {
+  margin-bottom: 16px;
+}
+
+.certidao-rodape {
+  margin-top: 48px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura {
+  margin-top: 64px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.certidao-assinatura .linha {
+  display: inline-block;
+  border-top: 1px solid #1a1a1a;
+  padding-top: 6px;
+  min-width: 320px;
+}
+```
+
+<div class="certidao-cabecalho">
+```{r logo-html, results='asis'}
+if (logo_base64 != "") {
+  cat(glue('<img src="{logo_base64}" alt="Logo MPRO" />'))
+}
+```
+<h1>Ministério Público do Estado de Rondônia</h1>
+<h2>Diretoria-Geral de Pessoal</h2>
+</div>
+
+<div class="certidao-titulo">
+Certidão Funcional Consolidada nº `r numero_certidao`
+</div>
+
+<div class="certidao-corpo">
+
+<p>
+Certificamos, para os devidos fins, que <strong>`r nome`</strong>,
+matrícula nº <strong>`r matricula`</strong>, realizou Residência no
+Ministério Público do Estado de Rondônia, na unidade de
+<strong>`r lotacao`</strong>, `r periodo_texto`, sob a supervisão de
+<strong>`r gestor`</strong>, `r cargogestor`, matrícula nº
+`r matriculagestor`.
+</p>
+
+<p>
+A designação decorre da `r dadosportaria`, publicada no `r diario`.
+</p>
+
+<p>
+Por ser verdade, firma-se a presente certidão.
+</p>
+
+</div>
+
+<div class="certidao-rodape">
+<p>Porto Velho (RO), `r datahoje`.</p>
+</div>
+
+<div class="certidao-assinatura">
+<span class="linha">
+`r gestor`<br>`r cargogestor`<br>
+Ministério Público do Estado de Rondônia<br>
+Matrícula nº `r matriculagestor`<br>
+E-mail: `r emailgestor`<br>
+Telefone: `r telefonegestor`
+</span>
+</div>
