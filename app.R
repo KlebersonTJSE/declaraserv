@@ -61,8 +61,7 @@ obter_env_obrigatoria <- function(nome_var) {
 # =========================================================================
 # JAVA_HOME
 # -------------------------------------------------------------------------
-# BUG CORRIGIDO: esta definição precisa acontecer ANTES de library(rJava)
-# ser chamado. O rJava lê JAVA_HOME (e, no Windows, ajusta o PATH para
+# O rJava lê JAVA_HOME (e, no Windows, ajusta o PATH para
 # encontrar jvm.dll) já na inicialização do pacote — se JAVA_HOME só for
 # definido depois de library(rJava), o valor configurado no .Renviron
 # pode ser ignorado silenciosamente, e o app passa a depender de um
@@ -163,25 +162,6 @@ rm(distro_check)
 # =========================================================================
 # RMD_DIR — SEMPRE resolvido via `here`, sem caminho fixo/variável de
 # ambiente de espécie alguma.
-# -------------------------------------------------------------------------
-# BUG CORRIGIDO: existia uma variável DECLARASERV_RMD_DIR no .Renviron que,
-# quando definida (ex.: como "~/declaraserv/rmark"), tinha prioridade
-# sobre o here::here("rmark") abaixo. O problema é que "~" no R/Windows
-# expande para a pasta de Documentos do usuário (via path.expand()), não
-# para a raiz do projeto — por isso o caminho resolvido ficava faltando a
-# subpasta real onde o repositório foi clonado (ex.: ".../Documentos/
-# declaraserv/rmark" em vez de ".../Documentos/Github/declaraserv/rmark").
-#
-# Removida essa variável/override por completo: agora RMD_DIR é SEMPRE
-# here::here("rmark"), ou seja, a subpasta "rmark" dentro da raiz do
-# projeto — a raiz sendo definida por here::i_am("app.R") no topo deste
-# arquivo, que ancora no local real de onde o app.R foi executado. Isso
-# funciona da mesma forma não importa em qual máquina/pasta o repositório
-# for clonado, sem depender de HOME, de "~" ou de qualquer configuração
-# manual no .Renviron.
-#
-# Se o seu .Renviron ainda tiver uma linha "DECLARASERV_RMD_DIR=...", ela
-# pode ser removida — não é mais lida em lugar nenhum do app.
 # =========================================================================
 RMD_DIR <- here::here("rmark")
 
@@ -227,12 +207,6 @@ if (!file.exists(LOGO_PATH)) {
 
 # =========================================================================
 # LOGO DA TELA DE LOGIN
-# -------------------------------------------------------------------------
-# BUG CORRIGIDO: a tela de login referencia "img/declaraserv_logo.png"
-# (tags$img(src = "img/...")), mas nada registrava a pasta "img/" como
-# rota servida pelo Shiny — faltava addResourcePath("img", ...). Sem
-# isso, o navegador pede a imagem e recebe 404, mesmo com o arquivo
-# existindo em disco; é por isso que a logo não aparecia.
 # =========================================================================
 IMG_DIR <- file.path(APP_DIR, "img")
 
@@ -374,9 +348,7 @@ ORDER BY
 # =========================================================================
 # LIMPEZA DE DIRETÓRIOS TEMPORÁRIOS DE RENDERIZAÇÃO
 # -------------------------------------------------------------------------
-# Cada certidão gerada cria uma pasta nova em tempdir() e nunca a removia;
-# numa sessão de Shiny Server de longa duração isso acumulava arquivos
-# indefinidamente. Remove pastas "certidao_*" com mais de `max_idade_horas`.
+# Remove pastas "certidao_*" com mais de `max_idade_horas`.
 # =========================================================================
 limpar_renders_antigos <- function(max_idade_horas = 2) {
 
@@ -1188,21 +1160,6 @@ server <- function(input, output, session) {
                         alt = "DeclaraServ"
                     )
                 ),
-
-                # div(
-                #     class = "login-icon-badge mb-3",
-                #     icon("shield-halved")
-                # ),
-                #
-                # tags$h4(
-                #     "Declaraserv",
-                #     class = "login-title fw-bold mb-1"
-                # ),
-                #
-                # tags$p(
-                #     "Acesso ao sistema de emissão de certidões On-line",
-                #     class = "login-subtitle text-muted mb-4"
-                # ),
 
                 if (is.null(metodoAcesso())) {
 
