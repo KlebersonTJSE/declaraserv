@@ -10,6 +10,10 @@ params:
   numero_processo: ""
   codigo_validacao: ""
   logo_path: ""
+  distro: "TJSE"
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
 ```{r setup, include=FALSE}
@@ -33,68 +37,62 @@ if (file.exists(renviron_path)) {
   readRenviron(renviron_path)
 }
 
-# Lê uma variável de ambiente obrigatória; interrompe a renderização com
-# mensagem clara caso ela não esteja definida no .Renviron.
-obter_env_obrigatoria <- function(nome_var) {
-  valor <- Sys.getenv(nome_var, unset = "")
-
-  if (valor == "") {
-    stop(
-      "Variável de ambiente obrigatória não definida: ", nome_var,
-      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
-    )
-  }
-
-  valor
-}
-
 # =========================================================================
 # PACOTES
 # =========================================================================
 library(DBI)
-library(rJava)
-library(RJDBC)
 library(glue)
 library(stringr)
 library(base64enc)
 
 # =========================================================================
-# CONEXÃO COM O IRIS
+# EMPRESA (DISTRO) E CONEXÃO COM O IRIS — MULTI-EMPRESA
 # -------------------------------------------------------------------------
-# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
-# .Renviron — sem valores padrão hardcoded no código.
+# Este template fica em "rmark/TJSE/afastamento_funcional.Rmd" e por isso só é
+# selecionado quando a empresa logada é a TJSE (ver
+# obter_certidao_tipos() em app.R) — mas a conexão com o banco não fica
+# mais hardcoded para uma empresa fixa: ela usa a mesma função
+# conectar_banco(), de R/database.R, do restante da aplicação, chamada
+# com a empresa recebida via params$distro (enviada pelo app.R no
+# momento da geração). Isso evita duplicar/desalinhar a lógica de
+# credenciais (o código anterior lia "MPRO_IRIS_PASS"/"MPRO_JAVA_HOME",
+# que nunca bateram com o padrão real "{DISTRO}_IRIS_PASSWORD" usado em
+# R/database.R — e, pior, estavam fixas em MPRO dentro de um template
+# que é da TJSE).
+#
+# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R),
+# conectar_banco()/distro_env() já podem estar carregadas; para permitir
+# renderizar/testar este .Rmd isoladamente, elas são carregadas aqui
+# também, se ainda não existirem.
 # =========================================================================
-Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+utils_path <- file.path(getwd(), "R", "utils.R")
+database_path <- file.path(getwd(), "R", "database.R")
 
-driver_class <- Sys.getenv(
-  "MPRO_IRIS_DRIVER_CLASS",
-  unset = "com.intersystems.jdbc.IRISDriver"
-)
+if (!exists("distro_env", mode = "function")) {
+  if (!file.exists(utils_path)) {
+    stop("Não foi possível localizar R/utils.R em: ", utils_path)
+  }
+  source(utils_path)
+}
 
-jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
-url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
-iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
-iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
+if (!exists("conectar_banco", mode = "function")) {
+  if (!file.exists(database_path)) {
+    stop("Não foi possível localizar R/database.R em: ", database_path)
+  }
+  source(database_path)
+}
 
-if (!file.exists(jar_path)) {
+distro <- as.character(params$distro)
+
+if (is.na(distro) || trimws(distro) == "") {
   stop(
-    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
-    ". Verifique o caminho configurado no .Renviron para este ",
-    "servidor/ambiente."
+    "Parâmetro 'distro' (empresa) não informado. Este template precisa ",
+    "saber qual empresa está gerando a certidão para conectar no banco ",
+    "correto."
   )
 }
 
-drv <- JDBC(
-  driverClass = driver_class,
-  classPath = jar_path
-)
-
-con <- dbConnect(
-  drv,
-  url,
-  user = iris_user,
-  password = iris_pass
-)
+con <- conectar_banco(distro)
 
 # =========================================================================
 # CONSULTA 1 — Afastamentos funcionais (RHCadAfastamento)
@@ -281,7 +279,7 @@ total_dias_fmt <- format(total_dias, big.mark = ".")
 # =========================================================================
 logo_path <- as.character(params$logo_path)
 if (is.na(logo_path) || logo_path == "") {
-  logo_path <- file.path(getwd(), "assets", "logo_mpro.png")
+  logo_path <- file.path(getwd(), "assets", distro, "logo.png")
 }
 
 logo_base64 <- ""
@@ -419,35 +417,38 @@ body {
 }
 ```
 
-<div class="certidao-cabecalho">
+::: certidao-cabecalho
 ```{r logo-html, results='asis'}
 if (logo_base64 != "") {
-  cat(glue('<img src="{logo_base64}" alt="Logo MPRO" />'))
+  cat(glue('<img src="{logo_base64}" alt="Logo {distro}" />'))
 }
 ```
-<h1>Ministério Público do Estado de Rondônia</h1>
-<h2>Procuradoria-Geral de Justiça</h2>
+
+<h1>Poder Judiciário do Estado de Sergipe</h1>
+
+<h2>Tribunal de Justiça</h2>
+
 <h3>`r unidade_administrativa`</h3>
-</div>
+:::
 
-<div class="certidao-titulo">
+::: certidao-titulo
 Declaração de Afastamentos Funcionais nº `r numero_certidao`
-</div>
+:::
 
-<div class="certidao-corpo">
+::: certidao-corpo
+<p>Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF
+nº <strong>`r cpf`</strong>, matrícula nº
+<strong>`r matricula`</strong>, ocupante do cargo de
+<strong>`r cargo`</strong>, possui registrados em seus assentamentos
+funcionais os seguintes períodos de afastamento/licença:</p>
+:::
 
-<p>
-Declaramos, para os devidos fins, que <strong>`r nome`</strong>, CPF nº
-<strong>`r cpf`</strong>, matrícula nº <strong>`r matricula`</strong>,
-ocupante do cargo de <strong>`r cargo`</strong>, possui registrados em
-seus assentamentos funcionais os seguintes períodos de
-afastamento/licença:
-</p>
+::::::: certidao-secao
+<h4>
 
-</div>
+1.  Afastamentos registrados
 
-<div class="certidao-secao">
-<h4>1. Afastamentos registrados</h4>
+    </h4>
 
 ```{r tabela-afastamentos, results='asis'}
 cat('<table class="tabela-afastamentos">')
@@ -473,58 +474,60 @@ cat('</table>')
 
 </div>
 
-<div class="certidao-secao">
-<h4>2. Informações complementares</h4>
+:::::: certidao-secao
+<h4>
 
-<div class="certidao-corpo">
-<p>
-Os afastamentos acima foram registrados nos assentamentos funcionais
-do(a) servidor(a) mediante os procedimentos administrativos e
-documentos comprobatórios pertinentes.
-</p>
+2.  Informações complementares
+
+    </h4>
+
+::: certidao-corpo
+<p>Os afastamentos acima foram registrados nos assentamentos funcionais
+do(a) servidor(a) mediante os procedimentos administrativos e documentos
+comprobatórios pertinentes.</p>
 
 <p class="certidao-aviso">
+
 Quando o afastamento decorrer de benefício previdenciário ou de
 competência de outro órgão/entidade, esta declaração limita-se a
-registrar o período de afastamento funcional constante dos
-assentamentos do Ministério Público do Estado de Rondônia, não
-constituindo declaração de concessão ou manutenção de benefício
-previdenciário.
+registrar o período de afastamento funcional constante dos assentamentos
+do Tribunal de Justiça de Sergipe, não constituindo declaração de
+concessão ou manutenção de benefício previdenciário.
+
 </p>
 
 <p class="certidao-aviso">
+
 A presente declaração <strong>não contém informações relativas a
 diagnóstico, CID ou outros dados médicos protegidos</strong>,
 limitando-se às informações funcionais necessárias à comprovação do
 afastamento.
+
 </p>
 
-<p>
-A presente declaração é emitida a requerimento do(a) interessado(a), para fins de
-comprovação perante órgãos públicos, instituições privadas,
+<p>A presente declaração é emitida a requerimento do(a) interessado(a),
+para fins de comprovação perante órgãos públicos, instituições privadas,
 instituições de ensino, empregadores, entidades previdenciárias ou
-outras instituições que necessitem comprovar o período de
-afastamento funcional.
-</p>
-</div>
+outras instituições que necessitem comprovar o período de afastamento
+funcional.</p>
+:::
+
 </div>
 
-<div class="certidao-rodape">
+::: certidao-rodape
 <p>Porto Velho/RO, `r datahoje`.</p>
-</div>
+:::
 
-<div class="certidao-assinatura">
-<span class="linha">
-`r gestor`<br>`r cargogestor`<br>
-Ministério Público do Estado de Rondônia<br>
-Matrícula nº `r matriculagestor`<br>
-E-mail: `r emailgestor`<br>
-Telefone: `r telefonegestor`
-</span>
-</div>
+::: certidao-assinatura
+[ `r gestor`<br>`r cargogestor`<br> Tribunal de Justiça do Estado de
+Sergipe<br> Matrícula nº `r matriculagestor`<br> E-mail:
+`r emailgestor`<br> Telefone: `r telefonegestor` ]{.linha}
+:::
 
 <p style="text-align:center; font-size:12px; margin-top:24px;">
+
 <strong>Documento assinado eletronicamente.</strong>
+
 </p>
 
 ```{r validacao, results='asis'}
@@ -541,3 +544,5 @@ if (length(linhas) > 0) {
   cat('</div>')
 }
 ```
+::::::
+:::::::
