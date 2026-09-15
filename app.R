@@ -1398,6 +1398,16 @@ server <- function(input, output, session) {
                     )
                 ),
 
+                tags$h4(
+                    "Acesso ao sistema",
+                    class = "login-title fw-bold mb-1"
+                ),
+
+                tags$p(
+                    "Escolha como deseja entrar no DeclaraServ",
+                    class = "login-subtitle text-muted mb-4"
+                ),
+
                 if (is.null(metodoAcesso())) {
 
                     # =============================================
