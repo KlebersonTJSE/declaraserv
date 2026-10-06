@@ -1,9 +1,10 @@
 # =========================================================================
 # app.R — Declaraserv | Geração de Certidão MPRO (Formato HTML)
 # -------------------------------------------------------------------------
-# Login corporativo (Active Directory) ou código Authenticator (TOTP),
-# seguindo o mesmo layout/fluxo de autenticação usado em outros sistemas
-# internos, adaptado para a aplicação Declaraserv.
+# Login corporativo (Active Directory), código Authenticator (TOTP) ou
+# Login de Administrador (senha mestra), seguindo o mesmo layout/fluxo de
+# autenticação usado em outros sistemas internos, adaptado para a
+# aplicação Declaraserv.
 #
 # Ordem de carregamento (importante):
 #   1. .Renviron  ->  2. JAVA_HOME  ->  3. pacotes  ->  4. Python
@@ -417,6 +418,71 @@ onStop(function() {
 })
 
 # =========================================================================
+# LOGIN DE ADMINISTRADOR (SENHA MESTRA)
+# -------------------------------------------------------------------------
+# Terceira opção da tela de login, além de AD e Authenticator. Mesmas
+# regras do FarolJus Lite:
+#
+#   - Só vale para os logins listados em ADMINS_TOTP (comparação sem
+#     diferenciar maiúsculas/minúsculas). Para qualquer outro login, a
+#     senha é tratada como inválida, igual a qualquer outro texto.
+#   - A senha é SENHA_MESTRE_ADMIN, configurável no .Renviron; sem essa
+#     variável, usa "M4st3r$" como padrão.
+#   - Ainda depende de o login ter cadastro em usuarios_totp (nome). Para
+#     isso funcionar mesmo num banco recém-criado, os logins de
+#     ADMINS_TOTP são cadastrados automaticamente na inicialização (ver
+#     garantir_admins_totp_padrao(), abaixo) — cadastros existentes nunca
+#     são sobrescritos.
+#   - O administrador atende mais de uma empresa: escolhe a empresa numa
+#     janela modal logo após o login (obrigatório) e pode trocá-la depois
+#     pelo ícone "Trocar empresa" da barra lateral.
+#   - Tem acesso à aba "Administração TOTP", como quem entra via AD.
+# =========================================================================
+ADMINS_TOTP <- c("adminK", "adminE")
+
+SENHA_MESTRE_ADMIN <- Sys.getenv("SENHA_MESTRE_ADMIN", unset = "M4st3r$")
+
+usuario_eh_admin_totp <- function(login) {
+
+    if (is.null(login) || length(login) == 0 || is.na(login[1]) || trimws(login[1]) == "") {
+        return(FALSE)
+    }
+
+    tolower(trimws(login[1])) %in% tolower(ADMINS_TOTP)
+}
+
+# Cadastro TOTP de um login (ativo), sem validar código — usado só depois
+# de a senha mestra já ter sido conferida.
+obter_cadastro_admin <- function(con, login) {
+    dbGetQuery(
+        con,
+        "SELECT login, nome, distro FROM usuarios_totp
+          WHERE lower(login) = lower(?) AND ativo = 1",
+        params = list(trimws(login))
+    )
+}
+
+# Garante um cadastro em usuarios_totp para cada login de ADMINS_TOTP
+# (idempotente: INSERT OR IGNORE nunca sobrescreve um cadastro existente).
+# A chave secreta é aleatória e não é exibida — se o administrador quiser
+# usar também o Authenticator, recadastre-o em "Administração TOTP".
+garantir_admins_totp_padrao <- function(con, admins = ADMINS_TOTP) {
+
+    for (login in admins) {
+        dbExecute(
+            con,
+            "INSERT OR IGNORE INTO usuarios_totp (login, nome, secret_key, distro, ativo)
+             VALUES (?, ?, ?, NULL, 1)",
+            params = list(login, login, gerar_totp_secret())
+        )
+    }
+
+    invisible(TRUE)
+}
+
+garantir_admins_totp_padrao(con)
+
+# =========================================================================
 # CONSULTA — consultar_matricula() agora fica em R/database.R
 # =========================================================================
 
@@ -660,10 +726,38 @@ ui <- fluidPage(
                 font-size: .9rem;
             }
 
-            /* Cartões de método de acesso (radioButtons estilizado) */
+            /* Passo 1 (seletor de método): o cartão de login fica mais
+               largo para caber as três opções lado a lado. Nos passos
+               seguintes (formulários), volta aos 460px. */
+
+            .login-card:has(.metodo-opcoes) {
+                max-width: 820px;
+            }
+
+            /* Cartões de método de acesso (radioButtons estilizado),
+               dispostos EM LINHA. flex-wrap + flex-basis mínimo fazem os
+               cartões se reorganizarem sozinhos ao redimensionar a
+               janela: 3 por linha em telas largas, 2 ou 1 em telas
+               estreitas (celular), sempre ocupando a largura toda. */
+
+            /* O Shiny fixa inputs em 300px de largura por padrão —
+               aqui o grupo de opções ocupa a largura toda do cartão. */
+            .metodo-opcoes .shiny-input-container {
+                width: 100%;
+                max-width: 100%;
+            }
+
+            .metodo-opcoes .shiny-options-group {
+                display: flex;
+                flex-wrap: wrap;
+                gap: .85rem;
+                margin-bottom: .85rem;
+            }
 
             .metodo-opcoes .radio {
-                margin-bottom: .85rem;
+                flex: 1 1 200px;
+                display: flex;
+                margin: 0;
             }
 
             .metodo-opcoes .radio label {
@@ -671,6 +765,8 @@ ui <- fluidPage(
                 align-items: flex-start;
                 gap: .85rem;
                 width: 100%;
+                height: 100%;      /* cartões da mesma linha com a mesma altura */
+                box-sizing: border-box;
                 margin: 0;
                 border: 1.5px solid #e2e6ea;
                 border-radius: .85rem;
@@ -897,7 +993,7 @@ ui <- fluidPage(
 
             $(document).on(
                 'keydown keyup focus',
-                '#senha',
+                '#senha, #senha_admin',
                 function(event) {
 
                     var aviso =
@@ -933,7 +1029,7 @@ ui <- fluidPage(
 
             $(document).on(
                 'blur',
-                '#senha',
+                '#senha, #senha_admin',
                 function() {
 
                     $('#capslock_warning').hide();
@@ -1012,11 +1108,24 @@ server <- function(input, output, session) {
     dadosUsuario <- reactiveVal(NULL)
     fotoUsuario <- reactiveVal(NULL)
 
-    # Método escolhido na tela de seleção ("ad" | "totp" | NULL = seletor)
+    # Método escolhido na tela de seleção
+    # ("ad" | "totp" | "admin" | NULL = seletor)
     metodoAcesso <- reactiveVal(NULL)
 
-    # Método efetivamente usado no login bem-sucedido ("AD" | "TOTP")
+    # Método efetivamente usado no login bem-sucedido
+    # ("AD" | "TOTP" | "ADMIN")
     metodoAutenticado <- reactiveVal(NULL)
+
+    # Quem pode ver/usar a aba "Administração TOTP": login AD ou Login de
+    # Administrador (senha mestra).
+    podeAdministrar <- reactive({
+        isTRUE(autenticado()) && metodoAutenticado() %in% c("AD", "ADMIN")
+    })
+
+    # Quem escolhe a empresa livremente: só o Login de Administrador.
+    ehAdminSenhaMestra <- reactive({
+        isTRUE(autenticado()) && identical(metodoAutenticado(), "ADMIN")
+    })
 
     # Empresa (distro) do usuário autenticado — escolhida manualmente no
     # login AD, ou herdada do cadastro TOTP (ver R/auth_totp.R). É ela
@@ -1291,6 +1400,179 @@ server <- function(input, output, session) {
     }, ignoreInit = TRUE)
 
     # ---------------------------------------------------------------------
+    # LOGIN DE ADMINISTRADOR (senha mestra)
+    # ---------------------------------------------------------------------
+
+    observeEvent(input$entrar_admin, {
+
+        req(input$usuario_admin, input$senha_admin)
+
+        login_informado <- trimws(input$usuario_admin)
+
+        # Senha mestra só vale para logins de ADMINS_TOTP. Para qualquer
+        # outro login (ou senha errada) a resposta é a mesma mensagem
+        # genérica, sem revelar quais logins são de administrador.
+        senha_ok <- usuario_eh_admin_totp(login_informado) &&
+            identical(input$senha_admin, SENHA_MESTRE_ADMIN)
+
+        registro <- if (senha_ok) obter_cadastro_admin(con, login_informado) else NULL
+
+        dados <- if (!is.null(registro) && nrow(registro) == 1) {
+            list(
+                login       = registro$login[1],
+                displayName = registro$nome[1],
+                distro      = registro$distro[1]
+            )
+        } else {
+            NULL
+        }
+
+        registrar_auditoria(con, login_informado, "ADMIN:SENHA_MESTRA", !is.null(dados))
+
+        if (!is.null(dados)) {
+
+            autenticado(TRUE)
+            usuarioLogado(dados$login)
+            dadosUsuario(dados)
+            fotoUsuario(NULL)
+            metodoAutenticado("ADMIN")
+
+            # A empresa é escolhida na janela modal logo abaixo (não herda
+            # automaticamente a do cadastro, que pode nem estar preenchida).
+            distroSelecionado(NULL)
+            menuSelecionado("Certidão")
+            header_oculto(TRUE)
+
+            showNotification(
+                paste("Bem-vindo", dados$displayName),
+                type = "message"
+            )
+
+            mostrar_modal_empresa(obrigatorio = TRUE, sugerida = dados$distro)
+
+        } else if (senha_ok) {
+
+            # Senha mestra correta, mas o login não tem cadastro ativo em
+            # usuarios_totp (ex.: foi desativado em Administração TOTP).
+            showNotification(
+                paste0(
+                    "O usuário '", login_informado, "' não tem cadastro TOTP ativo. ",
+                    "Cadastre-o em Administração TOTP antes de usar a senha de administrador."
+                ),
+                type = "error",
+                duration = 10
+            )
+
+        } else {
+
+            showNotification(
+                "Usuário ou senha de administrador inválidos",
+                type = "error"
+            )
+
+        }
+
+    }, ignoreInit = TRUE)
+
+    # ---------------------------------------------------------------------
+    # ESCOLHA / TROCA DE EMPRESA (apenas Login de Administrador)
+    # ---------------------------------------------------------------------
+
+    mostrar_modal_empresa <- function(obrigatorio = FALSE, sugerida = NULL) {
+
+        atual <- distroSelecionado()
+        if (is.null(atual) || is.na(atual)) atual <- sugerida
+        if (!is.null(atual) && !is.na(atual)) atual <- toupper(trimws(atual))
+
+        opcoes <- DISTROS_DISPONIVEIS
+        selecionada <- opcoes[toupper(trimws(opcoes)) %in% atual]
+        if (length(selecionada) == 0 && length(opcoes) > 0) selecionada <- opcoes[1]
+
+        showModal(
+            modalDialog(
+                title = "Selecione a empresa",
+
+                if (length(opcoes) == 0) {
+                    div(
+                        class = "alert alert-warning mb-0",
+                        "Nenhuma empresa está configurada em DISTRO_1, DISTRO_2... ",
+                        "no .Renviron."
+                    )
+                } else {
+                    tagList(
+                        p(
+                            class = "text-muted",
+                            "Como administrador, você pode usar o sistema em nome de ",
+                            "qualquer empresa configurada. As consultas e certidões ",
+                            "seguirão a empresa selecionada abaixo."
+                        ),
+                        selectInput(
+                            "empresa_admin",
+                            "Empresa",
+                            choices = opcoes,
+                            selected = selecionada,
+                            width = "100%"
+                        )
+                    )
+                },
+
+                easyClose = !obrigatorio,
+
+                footer = tagList(
+                    if (!obrigatorio) modalButton("Cancelar"),
+                    if (length(opcoes) > 0) {
+                        actionButton(
+                            "confirmar_empresa_admin",
+                            "Usar esta empresa",
+                            class = "btn-primary"
+                        )
+                    }
+                )
+            )
+        )
+    }
+
+    observeEvent(input$confirmar_empresa_admin, {
+
+        req(ehAdminSenhaMestra(), input$empresa_admin)
+
+        # Defesa extra contra valor fora da lista (requisição manipulada).
+        if (!(input$empresa_admin %in% DISTROS_DISPONIVEIS)) {
+            showNotification("Empresa selecionada é inválida.", type = "error")
+            return(invisible(NULL))
+        }
+
+        removeModal()
+
+        if (identical(input$empresa_admin, distroSelecionado())) {
+            return(invisible(NULL))
+        }
+
+        # Os dados consultados pertencem ao banco da empresa anterior.
+        limpar_estado_certidao()
+        distroSelecionado(input$empresa_admin)
+
+        showNotification(
+            paste("Usando o sistema como a empresa", input$empresa_admin),
+            type = "message"
+        )
+
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$trocar_empresa, {
+        req(ehAdminSenhaMestra())
+        mostrar_modal_empresa(obrigatorio = FALSE)
+    }, ignoreInit = TRUE)
+
+    # Empresa no cabeçalho: saída própria, para que trocar de empresa não
+    # recrie toda a tela principal (abas, matrícula digitada etc.).
+    output$empresa_atual_display <- renderText({
+        req(autenticado())
+        distro <- distroSelecionado()
+        if (is.null(distro) || is.na(distro)) "(não selecionada)" else distro
+    })
+
+    # ---------------------------------------------------------------------
     # LOGOUT
     # ---------------------------------------------------------------------
 
@@ -1424,10 +1706,18 @@ server <- function(input, output, session) {
                                             div("Código Authenticator", class = "metodo-opcao-titulo"),
                                             div("Entrar com um código gerado no seu celular", class = "metodo-opcao-desc")
                                         )
+                                    ),
+
+                                    tagList(
+                                        icon("user-shield", class = "metodo-opcao-icone"),
+                                        div(
+                                            div("Login de Administrador", class = "metodo-opcao-titulo"),
+                                            div("Entrar com a senha de administrador", class = "metodo-opcao-desc")
+                                        )
                                     )
 
                                 ),
-                                choiceValues = list("ad", "totp"),
+                                choiceValues = list("ad", "totp", "admin"),
                                 selected = character(0)
                             )
 
@@ -1530,6 +1820,44 @@ server <- function(input, output, session) {
 
                     )
 
+                } else if (metodoAcesso() == "admin") {
+
+                    # =============================================
+                    # PASSO 2C - LOGIN DE ADMINISTRADOR (senha mestra)
+                    # =============================================
+
+                    tagList(
+
+                        actionLink(
+                            "voltar_metodo",
+                            tagList(icon("arrow-left"), " Voltar"),
+                            class = "voltar-link mb-4 d-inline-block"
+                        ),
+
+                        div(
+                            class = "mb-3",
+                            textInput("usuario_admin", "Usuário", width = "100%")
+                        ),
+
+                        div(
+                            class = "mb-2",
+                            passwordInput("senha_admin", "Senha de Administrador", width = "100%")
+                        ),
+
+                        div(
+                            id = "capslock_warning",
+                            icon("triangle-exclamation"),
+                            " Caps Lock está ativado"
+                        ),
+
+                        actionButton(
+                            "entrar_admin",
+                            tagList(icon("user-shield", class = "me-2"), "Entrar"),
+                            class = "btn btn-primary w-100 btn-acesso mt-4"
+                        )
+
+                    )
+
                 }
 
             )
@@ -1561,6 +1889,15 @@ server <- function(input, output, session) {
                     class = "icon-btn",
                     title = "Mostrar/ocultar informações do usuário"
                 ),
+
+                if (ehAdminSenhaMestra()) {
+                    actionLink(
+                        "trocar_empresa",
+                        icon("building"),
+                        class = "icon-btn",
+                        title = "Trocar empresa"
+                    )
+                },
 
                 actionLink(
                     "mostrar_readme",
@@ -1662,7 +1999,7 @@ server <- function(input, output, session) {
                             div(
                                 class = "info-item",
                                 tags$span("Empresa", class = "info-label"),
-                                tags$span(distroSelecionado(), class = "info-value")
+                                tags$span(textOutput("empresa_atual_display", inline = TRUE), class = "info-value")
                             ),
 
                             div(
@@ -1694,13 +2031,20 @@ server <- function(input, output, session) {
                             div(
                                 class = "info-item",
                                 tags$span("Empresa", class = "info-label"),
-                                tags$span(distroSelecionado(), class = "info-value")
+                                tags$span(textOutput("empresa_atual_display", inline = TRUE), class = "info-value")
                             ),
 
                             div(
                                 class = "info-item",
                                 tags$span("Método de acesso", class = "info-label"),
-                                tags$span("Código Authenticator (TOTP)", class = "info-value")
+                                tags$span(
+                                    if (identical(metodoAutenticado(), "ADMIN")) {
+                                        "Login de Administrador"
+                                    } else {
+                                        "Código Authenticator (TOTP)"
+                                    },
+                                    class = "info-value"
+                                )
                             )
 
                         )
@@ -1725,7 +2069,7 @@ server <- function(input, output, session) {
                         list(
                             nav_panel("Certidão", painel_certidao_ui())
                         ),
-                        if (identical(metodoAutenticado(), "AD")) {
+                        if (podeAdministrar()) {
                             list(
                                 nav_panel("Administração TOTP", mod_totp_admin_ui("totp_admin"))
                             )
@@ -2119,12 +2463,14 @@ server <- function(input, output, session) {
     )
 
     # ---------------------------------------------------------------------
-    # ADMINISTRAÇÃO TOTP (apenas visível/relevante para quem entrou via AD)
+    # ADMINISTRAÇÃO TOTP (AD ou Login de Administrador)
     # ---------------------------------------------------------------------
+    # A checagem de podeAdministrar() protege o módulo mesmo que alguém
+    # tente acionar a aba manualmente sem ter o perfil.
     mod_totp_admin_server(
         "totp_admin",
         con = con,
-        ativo = reactive(menuSelecionado() == "Administração TOTP"),
+        ativo = reactive(podeAdministrar() && menuSelecionado() == "Administração TOTP"),
         resetar = resetarAdminTotp
     )
 }
