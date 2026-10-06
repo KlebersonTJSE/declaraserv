@@ -5,32 +5,45 @@
 # seguindo o mesmo layout/fluxo de autenticação usado em outros sistemas
 # internos, adaptado para a aplicação Declaraserv.
 #
-# Corrige o diretório de trabalho caso o projeto não
-# tenha sido aberto pelo .Rproj
+# Ordem de carregamento (importante):
+#   1. .Renviron  ->  2. JAVA_HOME  ->  3. pacotes  ->  4. Python
+#   5. R/*.R (source explícito; o autoload do Shiny está desligado por
+#      R/_disable_autoload.R — ver comentário naquele arquivo).
 # =========================================================================
 
-if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
-    try(setwd(dirname(rstudioapi::getSourceEditorContext()$path)), silent = TRUE)
+# =========================================================================
+# DIRETÓRIO DO APP
+# -------------------------------------------------------------------------
+# Resolvido pelo `here` (procura .Rproj/.here/app.R a partir do diretório
+# atual). Antes, o app fazia setwd() com base na ABA ATIVA do editor do
+# RStudio — se a aba ativa fosse, por exemplo, R/auth.R, o APP_DIR
+# apontava para a pasta errada.
+# =========================================================================
+# Fallback só para quando o app.R é executado via "Source" no RStudio
+# fora do projeto (.Rproj) e o diretório atual não é a pasta do app.
+# Pelo botão "Run App" / shiny::runApp() o Shiny já entra na pasta certa.
+if (!file.exists("app.R") &&
+    requireNamespace("rstudioapi", quietly = TRUE) &&
+    rstudioapi::isAvailable()) {
+    caminho_editor <- rstudioapi::getSourceEditorContext()$path
+    if (identical(basename(caminho_editor), "app.R")) {
+        setwd(dirname(caminho_editor))
+    }
+    rm(caminho_editor)
 }
 
 library(here)
 here::i_am("app.R")
 
-# =========================================================================
-# .Renviron — carregamento explícito
-# -------------------------------------------------------------------------
-# O R carrega o .Renviron automaticamente ao iniciar a sessão, mas isso
-# depende de onde a sessão foi iniciada (ex.: Shiny Server, RStudio, Rscript
-# manual). Para não depender desse comportamento implícito, carregamos aqui
-# explicitamente o .Renviron que fica na própria pasta do app — antes de
-# QUALQUER library() que dependa de variáveis de ambiente (em especial
-# JAVA_HOME, que precisa existir antes de library(rJava) ser chamado).
-# =========================================================================
-readRenviron(here::here(".Renviron"))
-
-APP_DIR <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+APP_DIR    <- normalizePath(here::here(), winslash = "/", mustWork = TRUE)
 ASSETS_DIR <- file.path(APP_DIR, "assets")
 
+# =========================================================================
+# .Renviron — carregamento explícito (uma única vez)
+# -------------------------------------------------------------------------
+# Feito antes de QUALQUER library() que dependa de variáveis de ambiente
+# (JAVA_HOME para o rJava, RETICULATE_PYTHON para o reticulate).
+# =========================================================================
 RENVIRON_PATH <- file.path(APP_DIR, ".Renviron")
 
 if (file.exists(RENVIRON_PATH)) {
@@ -76,34 +89,39 @@ library(rJava)
 library(RJDBC)
 library(glue)
 library(DT)
-
 library(bslib)
-library(jsonlite)
 library(digest)
-
 library(DBI)
 library(RSQLite)
-
 library(reticulate)
 
-python_path <- Sys.getenv("RETICULATE_PYTHON", unset = Sys.which("python"))
-if (!nzchar(python_path) || !file.exists(python_path)) {
-    stop(
-        "Python não encontrado em '", python_path, "'. ",
-        "Verifique a instalação do Python ou defina RETICULATE_PYTHON no .Renviron ",
-        "apontando para o python.exe correto."
-    )
-}
-use_python(python_path, required = TRUE)
+# jsonlite também exporta validate(), que mascararia shiny::validate()
+# (era a origem do aviso "O seguinte objeto é mascarado...: validate").
+library(jsonlite, exclude = "validate")
+
+# =========================================================================
+# PYTHON (reticulate) — configurado ANTES de carregar R/auth.R
+# -------------------------------------------------------------------------
+# Ver R/python_env.R. Se o 'ldap3' estiver ausente, o app sobe mesmo
+# assim: o login AD mostra a mensagem com o comando de instalação e o
+# login por Authenticator (TOTP) continua funcionando.
+# =========================================================================
+source(file.path(APP_DIR, "R", "python_env.R"), encoding = "UTF-8")
+configurar_python()
 
 # =========================================================================
 # MÓDULOS DE AUTENTICAÇÃO, BANCO E UTILITÁRIOS
 # =========================================================================
-source(here::here("R", "utils.R"))
-source(here::here("R", "auth.R"))
-source(here::here("R", "auth_totp.R"))
-source(here::here("R", "database.R"))
-source(here::here("modules", "mod_totp_admin.R"))
+for (arquivo_r in c(
+    file.path(APP_DIR, "R", "utils.R"),
+    file.path(APP_DIR, "R", "auth.R"),
+    file.path(APP_DIR, "R", "auth_totp.R"),
+    file.path(APP_DIR, "R", "database.R"),
+    file.path(APP_DIR, "modules", "mod_totp_admin.R")
+)) {
+    source(arquivo_r, encoding = "UTF-8")
+}
+rm(arquivo_r)
 
 # =========================================================================
 # EMPRESAS (MULTI-DISTRO)
@@ -300,11 +318,22 @@ if (!file.exists(HEADER_LOGO_PATH)) {
 # =========================================================================
 README_PATH <- file.path(APP_DIR, "README.md")
 
-if (!file.exists(README_PATH)) {
+# Lido e convertido UMA vez na inicialização (antes era relido do disco
+# e reconvertido a cada clique no botão de ajuda).
+README_HTML <- if (file.exists(README_PATH)) {
+    shiny::markdown(paste(
+        readLines(README_PATH, warn = FALSE, encoding = "UTF-8"),
+        collapse = "\n"
+    ))
+} else {
     warning(
         "Arquivo README.md não encontrado em: ", README_PATH,
         ". O botão de ajuda exibirá uma mensagem informando que o ",
         "arquivo não está disponível."
+    )
+    div(
+        style = "color:#842029;",
+        "Arquivo README.md não encontrado em: ", README_PATH
     )
 }
 
@@ -316,12 +345,9 @@ if (!file.exists(README_PATH)) {
 # ele NENHUMA empresa consegue conectar. As credenciais específicas de
 # cada empresa (URL/usuário/senha) já foram checadas (com aviso, não
 # obrigatório) no laço de EMPRESAS (MULTI-DISTRO) acima, e são lidas de
-# fato por conectar_banco(distro) em R/database.R.
+# fato por conectar_banco(distro) em R/database.R (que também guarda o
+# driver JDBC em cache, para não recarregar o .jar a cada consulta).
 # =========================================================================
-DRIVER_CLASS <- Sys.getenv(
-    "IRIS_DRIVER_CLASS",
-    unset = "com.intersystems.jdbc.IRISDriver"
-)
 JAR_PATH <- obter_env_obrigatoria("IRIS_JAR_PATH")
 
 if (!file.exists(JAR_PATH)) {
@@ -347,6 +373,10 @@ con <- dbConnect(SQLite(), DB_LOGIN_PATH)
 # escritas; com um pequeno timeout, a segunda tentativa apenas espera em
 # vez de falhar imediatamente).
 dbExecute(con, "PRAGMA busy_timeout = 5000;")
+
+# WAL: leituras (auditoria, lista TOTP) não bloqueiam as gravações de
+# login de outras sessões, e vice-versa.
+invisible(dbGetQuery(con, "PRAGMA journal_mode = WAL;"))
 
 garantir_schema_login <- function(con) {
 
@@ -387,43 +417,8 @@ onStop(function() {
 })
 
 # =========================================================================
-# CONSULTA
+# CONSULTA — consultar_matricula() agora fica em R/database.R
 # =========================================================================
-consultar_matricula <- function(matricula_num, distro) {
-
-    con_iris <- conectar_banco(distro)
-
-    on.exit(
-        try(dbDisconnect(con_iris), silent = TRUE),
-        add = TRUE
-    )
-
-    query <- glue("
-SELECT TOP 1
-    Servidor->Nome AS NOME,
-    Servidor->Funcional->DataIngOrgaoFormatada AS DATAINICIO,
-    Servidor->Financeiro->DataDesligamento AS DATAFIM,
-    ProvDocumento_Tipo->Descricao AS PORTARIA_TIPO,
-    ProvDocumento_Numero AS PORTARIA_NUMERO,
-    TO_CHAR(ProvDocumento_DataDoc, 'DD/MM/YYYY') AS PORTARIA_DATA,
-    ProvDocumento_PublicacaoTipo->Descricao AS DIARIO_TIPO,
-    ProvDocumento_PublicacaoNumero AS DIARIO_NUMERO,
-    TO_CHAR(ProvDocumento_PublicacaoData, 'DD/MM/YYYY') AS DIARIO_DATA,
-    Servidor->Funcional->LotacaoExercicio->Descricao AS LOTACAO,
-    Servidor->Matricula AS MATRICULA,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
-FROM
-    RHCadCargoEfetivo
-WHERE
-    Servidor->MATRICULA = {matricula_num}
-ORDER BY
-    ProvDocumento_DataDoc DESC
-")
-
-    dbGetQuery(con_iris, query)
-}
 
 # =========================================================================
 # LIMPEZA DE DIRETÓRIOS TEMPORÁRIOS DE RENDERIZAÇÃO
@@ -1172,6 +1167,15 @@ server <- function(input, output, session) {
             return(invisible(NULL))
         }
 
+        if (!isTRUE(PYTHON_STATUS$ok)) {
+            showNotification(
+                paste("Login AD indisponível no momento.", PYTHON_STATUS$mensagem),
+                type = "error",
+                duration = 15
+            )
+            return(invisible(NULL))
+        }
+
         dados <- tryCatch(
             authenticate_ad(input$usuario, input$senha, distro_escolhida),
             error = function(e) {
@@ -1333,28 +1337,10 @@ server <- function(input, output, session) {
 
     observeEvent(input$mostrar_readme, {
 
-        conteudo_modal <- if (file.exists(README_PATH)) {
-
-            texto_readme <- paste(
-                readLines(README_PATH, warn = FALSE, encoding = "UTF-8"),
-                collapse = "\n"
-            )
-
-            shiny::markdown(texto_readme)
-
-        } else {
-
-            div(
-                style = "color:#842029;",
-                "Arquivo README.md não encontrado em: ", README_PATH
-            )
-
-        }
-
         showModal(
             modalDialog(
                 title = "README",
-                conteudo_modal,
+                README_HTML,
                 easyClose = TRUE,
                 size = "l",
                 footer = modalButton("Fechar")
@@ -1968,6 +1954,11 @@ server <- function(input, output, session) {
                             output_format = "html_document",
                             output_file = tmp_html,
                             output_dir = render_dir,
+                            # Arquivos intermediários (.knit.md, *_files/)
+                            # ficam na pasta temporária desta geração, e não
+                            # ao lado do .Rmd — evita conflito quando duas
+                            # sessões geram a mesma certidão ao mesmo tempo.
+                            intermediates_dir = render_dir,
                             params = list(
                                 matricula = matricula_num,
                                 numero_certidao = numero_certidao,
@@ -1977,7 +1968,7 @@ server <- function(input, output, session) {
                             envir = new.env(parent = globalenv()),
                             knit_root_dir = APP_DIR,
                             clean = TRUE,
-                            quiet = FALSE,
+                            quiet = TRUE,
                             encoding = "UTF-8"
                         )
 
@@ -2091,7 +2082,7 @@ server <- function(input, output, session) {
     output$baixar <- downloadHandler(
 
         filename = function() {
-            matricula_txt <- trimws(input$matricula)
+            matricula_txt <- as.character(matricula_consultada())
 
             tipo_certidao_atual <- input$tipo_certidao
             if (is.null(tipo_certidao_atual)) {
