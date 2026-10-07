@@ -10,6 +10,8 @@ params:
   numero_processo: ""
   codigo_validacao: ""
   logo_path: ""
+  distro: "MPRO"
+  fonte_dados: "auto"
 ---
 
 ```{r setup, include=FALSE}
@@ -20,155 +22,44 @@ knitr::opts_chunk$set(
 )
 
 # =========================================================================
-# .Renviron — carregamento explícito
+# FONTE DE DADOS — IRIS (produção) ou SQLite (dados de EXEMPLO)
 # -------------------------------------------------------------------------
-# Quando este .Rmd é renderizado a partir do app.R (mesma sessão R), as
-# variáveis de ambiente já carregadas pelo app.R estão disponíveis aqui.
-# Mas para permitir renderizar/testar este .Rmd isoladamente (fora do
-# Shiny), carregamos o .Renviron da pasta do projeto explicitamente também.
+# As consultas ficam em R/fonte_dados.R: as mesmas consultas IRIS que
+# antes estavam aqui e as equivalentes sobre a tabela exemplo_relatorios
+# do SQLite (dados fictícios, mesmas colunas). Renderizado pelo app, as
+# funções já estão carregadas e params$fonte_dados chega resolvido
+# ("iris" ou "exemplo"). Renderizado isoladamente, o arquivo é carregado
+# aqui (junto com o .Renviron) e "auto" testa o acesso ao IRIS.
 # =========================================================================
-renviron_path <- file.path(getwd(), ".Renviron")
-
-if (file.exists(renviron_path)) {
-  readRenviron(renviron_path)
-}
-
-# Lê uma variável de ambiente obrigatória; interrompe a renderização com
-# mensagem clara caso ela não esteja definida no .Renviron.
-obter_env_obrigatoria <- function(nome_var) {
-  valor <- Sys.getenv(nome_var, unset = "")
-
-  if (valor == "") {
-    stop(
-      "Variável de ambiente obrigatória não definida: ", nome_var,
-      ". Defina-a no arquivo .Renviron (veja .Renviron.example)."
-    )
-  }
-
-  valor
+if (!exists("consultar_relatorio", mode = "function")) {
+  source(file.path(getwd(), "R", "fonte_dados.R"), encoding = "UTF-8")
 }
 
 # =========================================================================
 # PACOTES
 # =========================================================================
 library(DBI)
-library(rJava)
-library(RJDBC)
 library(glue)
 library(stringr)
 library(base64enc)
+distro <- if (is.null(params$distro) || !nzchar(params$distro)) "MPRO" else params$distro
+fonte  <- resolver_fonte_dados(params$fonte_dados, distro)
 
-# =========================================================================
-# CONEXÃO COM O IRIS
-# -------------------------------------------------------------------------
-# Todas as credenciais e parâmetros de conexão vêm exclusivamente do
-# .Renviron — sem valores padrão hardcoded no código.
-# =========================================================================
-Sys.setenv(JAVA_HOME = obter_env_obrigatoria("MPRO_JAVA_HOME"))
+# TRUE -> o documento recebe a faixa e a marca d'água "EXEMPLO".
+dados_exemplo <- identical(fonte, "exemplo")
 
-driver_class <- Sys.getenv(
-  "MPRO_IRIS_DRIVER_CLASS",
-  unset = "com.intersystems.jdbc.IRISDriver"
-)
-
-jar_path  <- obter_env_obrigatoria("MPRO_IRIS_JAR_PATH")
-url       <- obter_env_obrigatoria("MPRO_IRIS_URL")
-iris_user <- obter_env_obrigatoria("MPRO_IRIS_USER")
-iris_pass <- obter_env_obrigatoria("MPRO_IRIS_PASS")
-
-if (!file.exists(jar_path)) {
-  stop(
-    "Driver JDBC do IRIS não encontrado em MPRO_IRIS_JAR_PATH: ", jar_path,
-    ". Verifique o caminho configurado no .Renviron para este ",
-    "servidor/ambiente."
-  )
-}
-
-drv <- JDBC(
-  driverClass = driver_class,
-  classPath = jar_path
-)
-
-con <- dbConnect(
-  drv,
-  url,
-  user = iris_user,
-  password = iris_pass
-)
-
-# =========================================================================
-# CONSULTA — Períodos de exercício (RHCadMovimentacao)
-# =========================================================================
 matricula_sql <- as.integer(params$matricula)
 
 if (is.na(matricula_sql)) {
   stop("Por favor, informe uma matrícula válida no parâmetro 'matricula'.")
 }
 
-query <- glue("
-SELECT
-    Servidor->Nome AS NOME,
-    Servidor->Pessoa->CpfFormatado AS CPF,
-    Servidor->Matricula AS MATRICULA,
-    DataFormatada AS DATAINICIO,
-    DataFimFormatada AS DATAFIM,
-    Dias AS DIAS,
-    FLOOR(Dias / 365) AS ANOS,
-    FLOOR(MOD(Dias, 365) / 30) AS MESES,
-    MOD(MOD(Dias, 365), 30) AS DIAS_RESTANTES,
-    FLOOR(Dias / 365) || ' anos, ' ||
-    FLOOR(MOD(Dias, 365) / 30) || ' meses, ' ||
-    MOD(MOD(Dias, 365), 30) || ' dias' AS TEMPO,
-    YEAR(Data) AS PERIODO,
-    Servidor->Funcional->CargoEfetivo->Descricao AS CARGOFUNCAO,
-    Exercicio->Descricao AS UNIDADE,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
-FROM
-    RHCadMovimentacao
-WHERE
-    Servidor->Matricula = {matricula_sql}
-ORDER BY
-    Data
-")
-
-periodos <- dbGetQuery(con, query)
-
 # =========================================================================
+# CONSULTA 1 — Períodos de exercício (RHCadMovimentacao)
 # CONSULTA 2 — Dados do gestor da lotação DGP (RHTabLotacao)
 # =========================================================================
-query_gestor <- "
-SELECT
-    Gestor->Nome AS GESTOR_NOME,
-    Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
-    Gestor->Matricula AS GESTOR_MATRICULA,
-    Email AS EMAIL,
-    TelefonePrincipal AS TELEFONE
-FROM
-    RHTabLotacao
-WHERE
-    Sigla = 'DGP'
-"
-
-dados_gestor <- tryCatch(
-  dbGetQuery(con, query_gestor),
-  error = function(e) {
-    warning("Falha ao consultar RHTabLotacao: ", conditionMessage(e))
-    data.frame(
-      GESTOR_NOME = NA, GESTOR_CARGO = NA, GESTOR_MATRICULA = NA,
-      EMAIL = NA, TELEFONE = NA,
-      stringsAsFactors = FALSE
-    )
-  }
-)
-
-# Usa apenas o primeiro registro retornado
-if (nrow(dados_gestor) > 0) {
-  dados_gestor <- dados_gestor[1, ]
-}
-
-dbDisconnect(con)
+periodos     <- consultar_relatorio("periodos_exercicio", matricula_sql, distro, fonte)
+dados_gestor <- consultar_gestor_dgp(distro, fonte)
 
 if (nrow(periodos) == 0) {
   stop(
@@ -466,6 +357,12 @@ body {
   text-align: center;
   line-height: 1.8;
 }
+```
+
+```{r aviso-exemplo, results='asis'}
+# Faixa + marca d'água "EXEMPLO" quando os dados vêm do SQLite
+# (R/fonte_dados.R) — o documento nunca passa por oficial.
+if (dados_exemplo) cat(html_aviso_exemplo_documento())
 ```
 
 <div class="certidao-cabecalho">

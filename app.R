@@ -10,6 +10,12 @@
 #   1. .Renviron  ->  2. JAVA_HOME  ->  3. pacotes  ->  4. Python
 #   5. R/*.R (source explícito; o autoload do Shiny está desligado por
 #      R/_disable_autoload.R — ver comentário naquele arquivo).
+#
+# Fonte de dados das declarações (R/fonte_dados.R): IRIS de produção ou,
+# quando ele não está acessível, dados FICTÍCIOS de exemplo da tabela
+# exemplo_relatorios do SQLite (data/declaraserv.db). Com dados de
+# exemplo, uma faixa "DADOS DE EXEMPLO" fica fixa na tela e os documentos
+# gerados recebem a marca d'água "EXEMPLO". Ver DECLARASERV_FONTE_DADOS.
 # =========================================================================
 
 # =========================================================================
@@ -81,13 +87,21 @@ obter_env_obrigatoria <- function(nome_var) {
 # pode ser ignorado silenciosamente, e o app passa a depender de um
 # JAVA_HOME "de sistema" que pode não ser o correto para produção.
 # =========================================================================
-JAVA_HOME_PATH <- obter_env_obrigatoria("JAVA_HOME")
-Sys.setenv(JAVA_HOME = JAVA_HOME_PATH)
+# Não é mais obrigatório: sem Java/IRIS o app sobe e usa os dados de
+# EXEMPLO do SQLite (ver R/fonte_dados.R).
+JAVA_HOME_PATH <- Sys.getenv("JAVA_HOME", unset = "")
+
+if (nzchar(JAVA_HOME_PATH)) {
+    Sys.setenv(JAVA_HOME = JAVA_HOME_PATH)
+} else {
+    warning(
+        "JAVA_HOME não definido no .Renviron. Sem Java não há conexão com ",
+        "o IRIS — as declarações usarão os dados de EXEMPLO."
+    )
+}
 
 library(shiny)
 library(rmarkdown)
-library(rJava)
-library(RJDBC)
 library(glue)
 library(DT)
 library(bslib)
@@ -99,6 +113,22 @@ library(reticulate)
 # jsonlite também exporta validate(), que mascararia shiny::validate()
 # (era a origem do aviso "O seguinte objeto é mascarado...: validate").
 library(jsonlite, exclude = "validate")
+
+# rJava/RJDBC (IRIS): se não carregarem (Java ausente ou JAVA_HOME
+# errado), o app continua — só o IRIS fica indisponível.
+IRIS_PACOTES_OK <- tryCatch({
+    suppressPackageStartupMessages({
+        library(rJava)
+        library(RJDBC)
+    })
+    TRUE
+}, error = function(e) {
+    warning(
+        "Não foi possível carregar rJava/RJDBC (", conditionMessage(e), "). ",
+        "As declarações usarão os dados de EXEMPLO do SQLite."
+    )
+    FALSE
+})
 
 # =========================================================================
 # PYTHON (reticulate) — configurado ANTES de carregar R/auth.R
@@ -118,6 +148,7 @@ for (arquivo_r in c(
     file.path(APP_DIR, "R", "auth.R"),
     file.path(APP_DIR, "R", "auth_totp.R"),
     file.path(APP_DIR, "R", "database.R"),
+    file.path(APP_DIR, "R", "fonte_dados.R"),
     file.path(APP_DIR, "modules", "mod_totp_admin.R")
 )) {
     source(arquivo_r, encoding = "UTF-8")
@@ -342,21 +373,21 @@ README_HTML <- if (file.exists(README_PATH)) {
 # CONEXÃO COM O IRIS
 # -------------------------------------------------------------------------
 # O driver JDBC (classe + .jar) é compartilhado por todas as empresas por
-# padrão — validado aqui uma única vez, de forma obrigatória, pois sem
-# ele NENHUMA empresa consegue conectar. As credenciais específicas de
+# padrão — validado aqui uma única vez. Sem ele nenhuma empresa conecta
+# ao IRIS, mas o app NÃO é interrompido: as declarações passam a usar os
+# dados de EXEMPLO do SQLite (R/fonte_dados.R). As credenciais específicas de
 # cada empresa (URL/usuário/senha) já foram checadas (com aviso, não
 # obrigatório) no laço de EMPRESAS (MULTI-DISTRO) acima, e são lidas de
 # fato por conectar_banco(distro) em R/database.R (que também guarda o
 # driver JDBC em cache, para não recarregar o .jar a cada consulta).
 # =========================================================================
-JAR_PATH <- obter_env_obrigatoria("IRIS_JAR_PATH")
+JAR_PATH <- Sys.getenv("IRIS_JAR_PATH", unset = "")
 
-if (!file.exists(JAR_PATH)) {
-    stop(
-        "Driver JDBC do IRIS não encontrado em IRIS_JAR_PATH: ",
-        JAR_PATH,
-        ". Verifique o caminho configurado no .Renviron para este ",
-        "servidor/ambiente."
+if (!nzchar(JAR_PATH) || !file.exists(JAR_PATH)) {
+    warning(
+        "Driver JDBC do IRIS não encontrado em IRIS_JAR_PATH: '", JAR_PATH,
+        "'. As declarações usarão os dados de EXEMPLO do SQLite até o ",
+        "caminho ser corrigido no .Renviron."
     )
 }
 
@@ -436,7 +467,8 @@ onStop(function() {
 #   - O administrador atende mais de uma empresa: escolhe a empresa numa
 #     janela modal logo após o login (obrigatório) e pode trocá-la depois
 #     pelo ícone "Trocar empresa" da barra lateral.
-#   - Tem acesso à aba "Administração TOTP", como quem entra via AD.
+#   - Tem acesso a "Administração TOTP" (menu Configurações), como quem
+#     entra via AD.
 # =========================================================================
 ADMINS_TOTP <- c("adminK", "adminE")
 
@@ -483,7 +515,26 @@ garantir_admins_totp_padrao <- function(con, admins = ADMINS_TOTP) {
 garantir_admins_totp_padrao(con)
 
 # =========================================================================
-# CONSULTA — consultar_matricula() agora fica em R/database.R
+# DADOS DE EXEMPLO (tabela exemplo_relatorios)
+# -------------------------------------------------------------------------
+# Cria a tabela e a carga de dados fictícios se ainda não existirem
+# (idempotente; nunca sobrescreve dados já presentes). Usada quando o
+# IRIS de produção não está acessível — ver R/fonte_dados.R.
+# =========================================================================
+tryCatch(
+    garantir_dados_exemplo(con),
+    error = function(e) {
+        warning("Não foi possível preparar os dados de exemplo: ", conditionMessage(e))
+    }
+)
+
+if (identical(modo_fonte_configurado(), "exemplo")) {
+    message("DECLARASERV_FONTE_DADOS = exemplo: o IRIS não será consultado.")
+}
+
+# =========================================================================
+# CONSULTAS — consultar_matricula() e as consultas dos relatórios ficam
+# em R/fonte_dados.R (IRIS ou dados de exemplo).
 # =========================================================================
 
 # =========================================================================
@@ -576,12 +627,10 @@ painel_certidao_ui <- function() {
             "Informe a matrícula do(a) residente para gerar a certidão."
         ),
 
-        textInput(
-            inputId = "matricula",
-            label = "Matrícula",
-            value = "",
-            placeholder = "Somente números"
-        ),
+        # Campo Matrícula: caixa de texto (IRIS) ou combobox com as
+        # matrículas disponíveis (dados de EXEMPLO) — ver
+        # output$campo_matricula no server. O id é sempre "matricula".
+        uiOutput("campo_matricula"),
 
         tags$script(HTML("
             $(document).on('input', '#matricula', function() {
@@ -934,9 +983,6 @@ ui <- fluidPage(
                 width: 44px;
                 height: 44px;
                 font-size: 20px;
-                margin-bottom: 4px;
-                border-bottom: 1px solid rgba(255,255,255,.15);
-                padding-bottom: 10px;
             }
 
             /* Nome de cada ícone — oculto com a barra recolhida, visível
@@ -970,7 +1016,7 @@ ui <- fluidPage(
                 display: inline;
             }
 
-            /* Separador entre a navegação (abas) e as ações. */
+            /* Separador logo abaixo do ícone Menu. */
             .icon-bar .icon-sep {
                 width: 28px;
                 border-top: 1px solid rgba(255,255,255,.15);
@@ -981,8 +1027,139 @@ ui <- fluidPage(
                 width: 100%;
             }
 
-            /* Botão da aba que está aberta (Certidão / Administração
-               TOTP) — ver handler JS marcar-menu-ativo. */
+            /* =============================================
+               CONFIGURAÇÕES — submenu flutuante à direita da barra
+               ============================================= */
+
+            .icon-grupo {
+                position: relative;
+            }
+
+            .icon-bar.expandida .icon-grupo {
+                width: 100%;
+            }
+
+            .icon-bar .icon-btn .icon-seta {
+                display: none;
+                margin-left: auto;
+                font-size: 11px;
+                opacity: .7;
+            }
+
+            .icon-bar.expandida .icon-btn .icon-seta {
+                display: inline;
+            }
+
+            .submenu-config {
+                display: none;
+                position: absolute;
+                top: 0;
+                left: calc(100% + 10px);
+                min-width: 230px;
+                background: #fff;
+                border: 1px solid rgba(0,0,0,.08);
+                border-radius: .6rem;
+                box-shadow: 0 .5rem 1.25rem rgba(15,23,42,.18);
+                padding: .35rem;
+                z-index: 1060;
+            }
+
+            .submenu-config.aberto {
+                display: block;
+            }
+
+            .submenu-config .submenu-titulo {
+                font-size: .7rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+                color: #6c757d;
+                padding: .35rem .6rem .25rem .6rem;
+            }
+
+            .submenu-config .submenu-item {
+                display: flex;
+                align-items: center;
+                gap: .6rem;
+                padding: .5rem .6rem;
+                border-radius: .4rem;
+                color: #212529;
+                font-size: .9rem;
+                text-decoration: none;
+                white-space: nowrap;
+            }
+
+            .submenu-config .submenu-item:hover {
+                background: #eef4ff;
+                color: #0d6efd;
+            }
+
+            /* =============================================
+               AVISO DADOS DE EXEMPLO — fixo no topo do conteúdo
+               (position: sticky), sempre visível enquanto a fonte
+               de dados for o SQLite de exemplo. Não pode ser
+               fechado.
+               ============================================= */
+
+            /* O sticky fica no contêiner do uiOutput (filho direto de
+               #app-content): num elemento interno ele não teria onde
+               deslizar e rolaria junto com a página. */
+            .aviso-dados-exemplo-wrap {
+                position: sticky;
+                top: 0;
+                z-index: 1040;
+                margin: -20px -25px 16px -25px;
+            }
+
+            .aviso-dados-exemplo-wrap:empty {
+                margin: 0;
+            }
+
+            .aviso-dados-exemplo {
+                padding: 10px 25px;
+                display: flex;
+                align-items: center;
+                gap: .75rem;
+                color: #fff;
+                font-size: .92rem;
+                background: repeating-linear-gradient(
+                    -45deg, #b45309, #b45309 14px, #c2620f 14px, #c2620f 28px
+                );
+                box-shadow: 0 .25rem .6rem rgba(0,0,0,.15);
+            }
+
+            .aviso-dados-exemplo .aviso-icone {
+                font-size: 1.25rem;
+                flex-shrink: 0;
+            }
+
+            .aviso-dados-exemplo .aviso-titulo {
+                font-weight: 800;
+                letter-spacing: .06em;
+            }
+
+            .aviso-dados-exemplo .aviso-motivo {
+                display: block;
+                font-size: .78rem;
+                opacity: .9;
+            }
+
+            /* Título dos modais ocupando a largura toda: no Bootstrap 5
+               o .modal-title encolhe até o tamanho do texto, e o X da janela
+               Administração TOTP ficava colado ao título em vez de ir
+               para o canto superior direito. */
+            .modal-header .modal-title {
+                flex: 1 1 auto;
+            }
+
+            /* Calendário (Auditoria - Gráfico) por cima da janela modal. */
+            .datepicker.dropdown-menu {
+                z-index: 2000 !important;
+            }
+
+            /* Opção selecionada (a última clicada entre Mostrar/ocultar,
+               Declaração e Configurações) — ver o JS SELEÇÃO NA BARRA
+               LATERAL. Sem seleção, todas têm a mesma cor. */
             .icon-bar .icon-btn.ativo {
                 background: rgba(255,255,255,.18);
                 color: #fff;
@@ -1158,20 +1335,37 @@ ui <- fluidPage(
                 }
             );
 
-            // Destaca, na barra lateral, o botão da aba aberta.
-            Shiny.addCustomMessageHandler(
-                'marcar-menu-ativo',
-                function(message) {
-                    document
-                        .querySelectorAll('.icon-bar .icon-btn[data-menu]')
-                        .forEach(function(el) {
-                            el.classList.toggle(
-                                'ativo',
-                                el.getAttribute('data-menu') === message.menu
-                            );
-                        });
-                }
-            );
+            // Submenu 'Configurações' — abre/fecha só no navegador (sem ida
+            // ao servidor). Fecha ao escolher uma opção, ao clicar fora ou
+            // com Esc.
+            function fecharSubmenuConfig() {
+                $('#submenu_config').removeClass('aberto');
+                $('#btn_configuracoes').attr('aria-expanded', 'false');
+            }
+
+            $(document).on('click', '#btn_configuracoes', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var aberto = $('#submenu_config').toggleClass('aberto').hasClass('aberto');
+                $(this).attr('aria-expanded', aberto ? 'true' : 'false');
+            });
+
+            $(document).on('click', '#submenu_config .submenu-item', fecharSubmenuConfig);
+
+            $(document).on('click', function(e) {
+                if (!$(e.target).closest('.icon-grupo').length) fecharSubmenuConfig();
+            });
+
+            $(document).on('keydown', function(e) {
+                if (e.key === 'Escape') fecharSubmenuConfig();
+            });
+
+            // SELEÇÃO NA BARRA LATERAL: destaca a opção clicada (e só
+            // ela). Feito no navegador, sem ida ao servidor.
+            $(document).on('click', '.icon-bar .icon-btn.selecionavel', function() {
+                $('.icon-bar .icon-btn.selecionavel').not(this).removeClass('ativo');
+                $(this).addClass('ativo');
+            });
 
         "))
 
@@ -1213,7 +1407,7 @@ server <- function(input, output, session) {
     # ("AD" | "TOTP" | "ADMIN")
     metodoAutenticado <- reactiveVal(NULL)
 
-    # Quem pode ver/usar a aba "Administração TOTP": login AD ou Login de
+    # Quem pode ver/usar "Administração TOTP" (janela modal): login AD ou Login de
     # Administrador (senha mestra).
     podeAdministrar <- reactive({
         isTRUE(autenticado()) && metodoAutenticado() %in% c("AD", "ADMIN")
@@ -1226,8 +1420,14 @@ server <- function(input, output, session) {
 
     # Empresa (distro) do usuário autenticado — escolhida manualmente no
     # login AD, ou herdada do cadastro TOTP (ver R/auth_totp.R). É ela
-    # que decide qual banco IRIS é consultado em consultar_matricula().
+    # que decide qual banco IRIS é consultado em consultar_matricula()
+    # (ou, sem acesso ao IRIS, os dados de exemplo — ver fonteDados).
     distroSelecionado <- reactiveVal(NULL)
+
+    # Fonte de dados das declarações para a empresa atual: "iris" (produção)
+    # ou "exemplo" (SQLite, dados fictícios) — ver R/fonte_dados.R. Controla
+    # a faixa "DADOS DE EXEMPLO" (output$aviso_dados_exemplo).
+    fonteDados <- reactiveVal(NULL)
 
     # Templates de certidão e logo da empresa atualmente logada — dependem
     # da subpasta "rmark/<empresa>/" e "assets/<empresa>/logo.png" (ver
@@ -1259,7 +1459,7 @@ server <- function(input, output, session) {
     # ABA SELECIONADA
     # ===================================================
 
-    menuSelecionado <- reactiveVal("Certidão")
+    menuSelecionado <- reactiveVal("Declaração")
 
     # Incrementado a cada logout — sinaliza para mod_totp_admin_server()
     # limpar seu estado interno (chave recém-gerada, campos do formulário),
@@ -1278,7 +1478,12 @@ server <- function(input, output, session) {
     tempo_geracao <- reactiveVal(NULL)
     numero_certidao_gerado <- reactiveVal(NULL)
 
+    # Fonte usada na consulta exibida — a geração do documento usa a MESMA
+    # fonte, para o documento sair com os dados que estão na tela.
+    fonte_consulta <- reactiveVal(NULL)
+
     limpar_estado_certidao <- function() {
+        fonte_consulta(NULL)
         dados_consulta(NULL)
         matricula_consultada(NULL)
         html_path(NULL)
@@ -1412,7 +1617,7 @@ server <- function(input, output, session) {
             fotoUsuario(obter_foto_usuario(dados))
             metodoAutenticado("AD")
             distroSelecionado(distro_escolhida)
-            menuSelecionado("Certidão")
+            menuSelecionado("Declaração")
 
             # Inicia com as informações do usuário escondidas.
             header_oculto(TRUE)
@@ -1420,7 +1625,7 @@ server <- function(input, output, session) {
             updateTabsetPanel(
                 session,
                 "menu",
-                selected = "Certidão"
+                selected = "Declaração"
             )
 
             showNotification(
@@ -1473,7 +1678,7 @@ server <- function(input, output, session) {
             fotoUsuario(NULL)
             metodoAutenticado("TOTP")
             distroSelecionado(dados$distro)
-            menuSelecionado("Certidão")
+            menuSelecionado("Declaração")
 
             # Inicia com as informações do usuário escondidas.
             header_oculto(TRUE)
@@ -1481,7 +1686,7 @@ server <- function(input, output, session) {
             updateTabsetPanel(
                 session,
                 "menu",
-                selected = "Certidão"
+                selected = "Declaração"
             )
 
             showNotification(
@@ -1541,7 +1746,7 @@ server <- function(input, output, session) {
             # A empresa é escolhida na janela modal logo abaixo (não herda
             # automaticamente a do cadastro, que pode nem estar preenchida).
             distroSelecionado(NULL)
-            menuSelecionado("Certidão")
+            menuSelecionado("Declaração")
             header_oculto(TRUE)
 
             showNotification(
@@ -1674,6 +1879,107 @@ server <- function(input, output, session) {
     })
 
     # ---------------------------------------------------------------------
+    # FONTE DE DADOS (IRIS ou EXEMPLO)
+    # ---------------------------------------------------------------------
+    # resolver_fonte_dados() testa o acesso ao IRIS da empresa (com cache
+    # de alguns minutos, compartilhado entre sessões) e devolve "iris" ou
+    # "exemplo". É chamada ao definir a empresa (login / troca de empresa)
+    # e antes de cada consulta — se o IRIS cair ou voltar, a faixa de aviso
+    # acompanha.
+    atualizar_fonte_dados <- function(distro) {
+        fonte <- tryCatch(
+            resolver_fonte_dados("auto", distro),
+            error = function(e) "exemplo"
+        )
+        fonteDados(fonte)
+        fonte
+    }
+
+    observeEvent(distroSelecionado(), {
+        distro <- distroSelecionado()
+        req(distro)
+        withProgress(
+            message = "Verificando acesso ao banco de dados...",
+            value = 0.5,
+            atualizar_fonte_dados(distro)
+        )
+    }, ignoreNULL = TRUE)
+
+    # ---------------------------------------------------------------------
+    # CAMPO MATRÍCULA — texto (IRIS) ou combobox (dados de EXEMPLO)
+    # ---------------------------------------------------------------------
+    # Com os dados de exemplo, digitar uma matrícula "de cabeça" não faz
+    # sentido: o campo vira um combobox com as matrículas do SQLite
+    # (busca por número ou nome). Volta a ser caixa de texto quando a
+    # fonte é o IRIS. Em ambos os casos o input é input$matricula, então
+    # validação e consulta não mudam.
+    output$campo_matricula <- renderUI({
+
+        req(autenticado())
+
+        if (identical(fonteDados(), "exemplo")) {
+
+            opcoes <- tryCatch(listar_matriculas_exemplo(), error = function(e) NULL)
+
+            if (!is.null(opcoes) && nrow(opcoes) > 0) {
+
+                escolhas <- stats::setNames(
+                    as.character(opcoes$MATRICULA),
+                    paste0(opcoes$MATRICULA, " — ", opcoes$NOME)
+                )
+
+                atual <- isolate(input$matricula)
+                selecionada <- if (!is.null(atual) && atual %in% escolhas) atual else ""
+
+                return(selectizeInput(
+                    inputId = "matricula",
+                    label = "Matrícula (dados de exemplo)",
+                    choices = c("", escolhas),
+                    selected = selecionada,
+                    width = "460px",
+                    options = list(
+                        placeholder = "Selecione ou digite a matrícula ou o nome"
+                    )
+                ))
+            }
+        }
+
+        textInput(
+            inputId = "matricula",
+            label = "Matrícula",
+            value = "",
+            placeholder = "Somente números"
+        )
+    })
+
+    output$aviso_dados_exemplo <- renderUI({
+
+        req(autenticado(), identical(fonteDados(), "exemplo"))
+
+        motivo <- if (identical(modo_fonte_configurado(), "exemplo")) {
+            "Modo de exemplo definido em DECLARASERV_FONTE_DADOS."
+        } else {
+            m <- motivo_iris_indisponivel(distroSelecionado())
+            paste0(
+                "O banco de produção (IRIS) não está acessível",
+                if (!is.null(m)) paste0(": ", m) else ".",
+                " As consultas e declarações usam dados fictícios do SQLite local."
+            )
+        }
+
+        div(
+            class = "aviso-dados-exemplo",
+            role = "alert",
+            icon("triangle-exclamation", class = "aviso-icone"),
+            div(
+                span(class = "aviso-titulo", "DADOS DE EXEMPLO"),
+                " — as informações exibidas NÃO são reais e os documentos gerados não têm validade.",
+                span(class = "aviso-motivo", motivo)
+            )
+        )
+    })
+
+    # ---------------------------------------------------------------------
     # LOGOUT
     # ---------------------------------------------------------------------
 
@@ -1686,7 +1992,8 @@ server <- function(input, output, session) {
         metodoAutenticado(NULL)
         metodoAcesso(NULL)
         distroSelecionado(NULL)
-        menuSelecionado("Certidão")
+        fonteDados(NULL)
+        menuSelecionado("Declaração")
 
         # Dados da certidão são de uma pessoa específica; ao sair, não
         # devem ficar disponíveis para quem fizer login a seguir na
@@ -1696,6 +2003,7 @@ server <- function(input, output, session) {
         # Idem para o formulário/chave TOTP recém-gerada (ver
         # mod_totp_admin_server() e o comentário em resetarAdminTotp acima).
         resetarAdminTotp(resetarAdminTotp() + 1)
+        adminAberto(FALSE)
 
         # A tela principal é recriada no próximo login com a barra
         # recolhida — o estado precisa acompanhar, senão o primeiro clique
@@ -1722,17 +2030,63 @@ server <- function(input, output, session) {
     # ---------------------------------------------------------------------
     # BARRA LATERAL — NAVEGAÇÃO ENTRE AS ABAS
     # ---------------------------------------------------------------------
-    # Os botões Certidão / Administração TOTP abrem a aba correspondente
-    # (as abas continuam visíveis no topo). A troca de aba — por qualquer
-    # um dos dois caminhos — destaca o botão certo (observeEvent(input$menu)).
+    # O botão Declaração abre a aba correspondente (que continua visível no
+    # topo). O destaque do botão é feito no navegador, ao clicar.
 
-    observeEvent(input$ir_certidao, {
-        nav_select("menu", selected = "Certidão", session = session)
+    observeEvent(input$ir_declaracao, {
+        nav_select("menu", selected = "Declaração", session = session)
     }, ignoreInit = TRUE)
 
+    # ---------------------------------------------------------------------
+    # ADMINISTRAÇÃO TOTP (janela modal)
+    # ---------------------------------------------------------------------
+    # Antes era uma aba ao lado de Declaração. Agora abre em janela modal
+    # pelo menu Configurações > Administração TOTP, como Trocar empresa e
+    # Ver instruções (só para login AD ou de Administrador).
+    #
+    # adminAberto() é o `ativo` do módulo: as consultas ao banco (usuários
+    # TOTP, auditoria) só rodam com a janela aberta. Por isso a janela não
+    # fecha com clique fora/Esc (easyClose = FALSE) — só pelo "Fechar" ou
+    # pelo X, que passam por observeEvent(input$fechar_admin) e mantêm
+    # adminAberto() coerente. Ao fechar, resetarAdminTotp() limpa a chave
+    # recém-gerada (secret em texto puro) e os campos do formulário.
+
+    adminAberto <- reactiveVal(FALSE)
+
     observeEvent(input$ir_admin_totp, {
+
         req(podeAdministrar())
-        nav_select("menu", selected = "Administração TOTP", session = session)
+
+        adminAberto(TRUE)
+
+        showModal(
+            modalDialog(
+                title = div(
+                    style = "position:relative; padding-right:28px;",
+                    icon("user-shield", class = "me-2"),
+                    "Administração TOTP",
+                    tags$button(
+                        type = "button",
+                        class = "btn-close",
+                        style = "position:absolute; top:50%; right:0; transform:translateY(-50%);",
+                        `aria-label` = "Fechar",
+                        title = "Fechar",
+                        onclick = "Shiny.setInputValue('fechar_admin', Math.random(), {priority: 'event'})"
+                    )
+                ),
+                mod_totp_admin_ui("totp_admin"),
+                size = "xl",
+                easyClose = FALSE,
+                footer = actionButton("fechar_admin", "Fechar")
+            )
+        )
+
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$fechar_admin, {
+        adminAberto(FALSE)
+        resetarAdminTotp(resetarAdminTotp() + 1)
+        removeModal()
     }, ignoreInit = TRUE)
 
     # ---------------------------------------------------------------------
@@ -1775,7 +2129,6 @@ server <- function(input, output, session) {
     observeEvent(input$menu, {
         req(input$menu)
         menuSelecionado(input$menu)
-        session$sendCustomMessage("marcar-menu-ativo", list(menu = input$menu))
     }, ignoreInit = TRUE)
 
     # ---------------------------------------------------------------------
@@ -2036,77 +2389,95 @@ server <- function(input, output, session) {
                     title = "Expandir/recolher menu"
                 ),
 
-                # -----------------------------------------------
-                # NAVEGAÇÃO — uma entrada por aba existente.
-                # data-menu = valor da aba (destaque do botão ativo).
-                # -----------------------------------------------
-
-                actionLink(
-                    "ir_certidao",
-                    tagList(
-                        icon("file-signature"),
-                        tags$span(class = "icon-label", "Certidão")
-                    ),
-                    class = paste(
-                        "icon-btn",
-                        if (identical(isolate(menuSelecionado()), "Certidão")) "ativo"
-                    ),
-                    title = "Certidão",
-                    `data-menu` = "Certidão"
-                ),
-
-                if (podeAdministrar()) {
-                    actionLink(
-                        "ir_admin_totp",
-                        tagList(
-                            icon("user-shield"),
-                            tags$span(class = "icon-label", "Administração TOTP")
-                        ),
-                        class = paste(
-                            "icon-btn",
-                            if (identical(isolate(menuSelecionado()), "Administração TOTP")) "ativo"
-                        ),
-                        title = "Administração TOTP",
-                        `data-menu` = "Administração TOTP"
-                    )
-                },
-
                 div(class = "icon-sep"),
 
                 # -----------------------------------------------
-                # AÇÕES
+                # OPÇÕES — classe "selecionavel": a opção clicada fica
+                # destacada (classe "ativo") e só ela; nenhuma começa
+                # destacada. Ver o JS "SELEÇÃO NA BARRA LATERAL".
                 # -----------------------------------------------
 
                 actionLink(
                     "toggle_header",
                     tagList(
                         icon("id-badge"),
-                        tags$span(class = "icon-label", "Mostrar/ocultar informações")
+                        tags$span(class = "icon-label", "Mostrar/ocultar")
                     ),
-                    class = "icon-btn",
+                    class = "icon-btn selecionavel",
                     title = "Mostrar/ocultar informações do usuário"
                 ),
 
-                if (ehAdminSenhaMestra()) {
-                    actionLink(
-                        "trocar_empresa",
-                        tagList(
-                            icon("building"),
-                            tags$span(class = "icon-label", "Trocar empresa")
-                        ),
-                        class = "icon-btn",
-                        title = "Trocar empresa"
-                    )
-                },
-
                 actionLink(
-                    "mostrar_readme",
+                    "ir_declaracao",
                     tagList(
-                        icon("circle-info"),
-                        tags$span(class = "icon-label", "Ver instruções")
+                        icon("file-signature"),
+                        tags$span(class = "icon-label", "Declaração")
                     ),
-                    class = "icon-btn",
-                    title = "Ver instruções (README)"
+                    class = "icon-btn selecionavel",
+                    title = "Declaração"
+                ),
+
+                # -----------------------------------------------
+                # CONFIGURAÇÕES — submenu com Administração TOTP,
+                # Trocar empresa e Ver instruções. Os IDs das opções
+                # são os mesmos dos antigos ícones, então os
+                # observeEvent() do server continuam valendo. Cada
+                # opção só aparece para quem pode usá-la:
+                #   - Administração TOTP: login AD ou de Administrador;
+                #   - Trocar empresa: login de Administrador;
+                #   - Ver instruções: todos.
+                # O abrir/fechar do submenu é só no navegador (JS
+                # fecharSubmenuConfig / #btn_configuracoes).
+                # -----------------------------------------------
+
+                div(
+                    class = "icon-grupo",
+
+                    tags$a(
+                        id = "btn_configuracoes",
+                        href = "#",
+                        class = "icon-btn selecionavel",
+                        title = "Configurações",
+                        role = "button",
+                        `aria-haspopup` = "true",
+                        `aria-expanded` = "false",
+                        icon("gear"),
+                        tags$span(class = "icon-label", "Configurações"),
+                        tags$span(class = "icon-seta", icon("chevron-right"))
+                    ),
+
+                    div(
+                        id = "submenu_config",
+                        class = "submenu-config",
+                        role = "menu",
+
+                        div(class = "submenu-titulo", "Configurações"),
+
+                        if (podeAdministrar()) {
+                            actionLink(
+                                "ir_admin_totp",
+                                tagList(icon("user-shield", class = "fa-fw"), "Administração TOTP"),
+                                class = "submenu-item",
+                                role = "menuitem"
+                            )
+                        },
+
+                        if (ehAdminSenhaMestra()) {
+                            actionLink(
+                                "trocar_empresa",
+                                tagList(icon("building", class = "fa-fw"), "Trocar empresa"),
+                                class = "submenu-item",
+                                role = "menuitem"
+                            )
+                        },
+
+                        actionLink(
+                            "mostrar_readme",
+                            tagList(icon("circle-info", class = "fa-fw"), "Ver instruções"),
+                            class = "submenu-item",
+                            role = "menuitem"
+                        )
+                    )
                 ),
 
                 actionLink(
@@ -2128,6 +2499,10 @@ server <- function(input, output, session) {
             div(
 
                 id = "app-content",
+
+                # Faixa "DADOS DE EXEMPLO" (só aparece com a fonte de
+                # exemplo) — fixa no topo enquanto a página rola.
+                uiOutput("aviso_dados_exemplo", class = "aviso-dados-exemplo-wrap"),
 
                 # ===============================================
                 # CABEÇALHO
@@ -2272,14 +2647,11 @@ server <- function(input, output, session) {
                             id = "menu",
                             selected = isolate(menuSelecionado())
                         ),
+                        # Administração TOTP deixou de ser aba: abre em
+                        # janela modal pelo menu Configurações.
                         list(
-                            nav_panel("Certidão", painel_certidao_ui())
-                        ),
-                        if (podeAdministrar()) {
-                            list(
-                                nav_panel("Administração TOTP", mod_totp_admin_ui("totp_admin"))
-                            )
-                        }
+                            nav_panel("Declaração", painel_certidao_ui())
+                        )
                     )
                 )
 
@@ -2324,9 +2696,12 @@ server <- function(input, output, session) {
             message = "Consultando dados...",
             value = 0.3,
             {
+                # IRIS ou exemplo (teste em cache; atualiza a faixa de aviso).
+                fonte_atual <- atualizar_fonte_dados(distro_atual)
+
                 resultado <- tryCatch(
                     {
-                        df <- consultar_matricula(matricula_num, distro_atual)
+                        df <- consultar_matricula(matricula_num, distro_atual, fonte_atual)
                         incProgress(0.7)
                         df
                     },
@@ -2365,6 +2740,7 @@ server <- function(input, output, session) {
                 }
 
                 if (!is.null(resultado)) {
+                    fonte_consulta(fonte_atual)
                     dados_consulta(resultado)
                     matricula_consultada(matricula_num)
                 }
@@ -2499,6 +2875,23 @@ server <- function(input, output, session) {
                             detail = "Preparando documento..."
                         )
 
+                        # Parâmetros do .Rmd — fonte_dados garante que o
+                        # documento use a mesma fonte (IRIS ou exemplo)
+                        # da consulta exibida na tela. Só são passados os
+                        # parâmetros que o template declara no YAML
+                        # (rmarkdown::render() recusa parâmetros não
+                        # declarados).
+                        params_render <- list(
+                            matricula = matricula_num,
+                            numero_certidao = numero_certidao,
+                            logo_path = logoPathAtual(),
+                            distro = distroSelecionado(),
+                            fonte_dados = if (is.null(fonte_consulta())) "auto" else fonte_consulta()
+                        )
+
+                        declarados <- names(rmarkdown::yaml_front_matter(rmd_path_selecionado)$params)
+                        params_render <- params_render[names(params_render) %in% declarados]
+
                         rmarkdown::render(
                             input = rmd_path_selecionado,
                             output_format = "html_document",
@@ -2509,12 +2902,7 @@ server <- function(input, output, session) {
                             # ao lado do .Rmd — evita conflito quando duas
                             # sessões geram a mesma certidão ao mesmo tempo.
                             intermediates_dir = render_dir,
-                            params = list(
-                                matricula = matricula_num,
-                                numero_certidao = numero_certidao,
-                                logo_path = logoPathAtual(),
-                                distro = distroSelecionado()
-                            ),
+                            params = params_render,
                             envir = new.env(parent = globalenv()),
                             knit_root_dir = APP_DIR,
                             clean = TRUE,
@@ -2640,8 +3028,12 @@ server <- function(input, output, session) {
             }
             tipo_txt <- sanitizar_nome_arquivo(trimws(tipo_certidao_atual))
 
+            # Documento gerado com dados fictícios: nome começa com EXEMPLO_.
+            prefixo <- if (identical(fonte_consulta(), "exemplo")) "EXEMPLO_" else ""
+
             sprintf(
-                "certidao_%s_%s.html",
+                "%scertidao_%s_%s.html",
+                prefixo,
                 tipo_txt,
                 matricula_txt
             )
@@ -2671,12 +3063,13 @@ server <- function(input, output, session) {
     # ---------------------------------------------------------------------
     # ADMINISTRAÇÃO TOTP (AD ou Login de Administrador)
     # ---------------------------------------------------------------------
-    # A checagem de podeAdministrar() protege o módulo mesmo que alguém
-    # tente acionar a aba manualmente sem ter o perfil.
+    # Só roda com a janela "Administração TOTP" aberta E para quem tem o
+    # perfil — a checagem de podeAdministrar() protege o módulo mesmo que
+    # alguém dispare input$ir_admin_totp manualmente.
     mod_totp_admin_server(
         "totp_admin",
         con = con,
-        ativo = reactive(podeAdministrar() && menuSelecionado() == "Administração TOTP"),
+        ativo = reactive(adminAberto() && podeAdministrar()),
         resetar = resetarAdminTotp
     )
 }

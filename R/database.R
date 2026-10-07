@@ -12,6 +12,10 @@
 # sobrescrever com {DISTRO}_IRIS_DRIVER_CLASS / {DISTRO}_IRIS_JAR_PATH.
 #
 # Pacotes (DBI, RJDBC) são carregados no app.R — sem library() aqui.
+#
+# As CONSULTAS (IRIS e dados de exemplo no SQLite) ficam em
+# R/fonte_dados.R — inclusive consultar_matricula(), que antes ficava
+# aqui.
 # =====================================================
 
 # -----------------------------------------------------
@@ -28,6 +32,11 @@ obter_driver_jdbc <- function(driver_class, jar_path) {
     chave <- paste(driver_class, jar_path, sep = "|")
 
     if (is.null(.jdbc_cache[[chave]])) {
+
+        if (!requireNamespace("RJDBC", quietly = TRUE)) {
+            stop("Pacote 'RJDBC' indisponível — não é possível conectar ao IRIS.")
+        }
+
         .jdbc_cache[[chave]] <- RJDBC::JDBC(
             driverClass = driver_class,
             classPath   = jar_path
@@ -35,6 +44,15 @@ obter_driver_jdbc <- function(driver_class, jar_path) {
     }
 
     .jdbc_cache[[chave]]
+}
+
+# Lê a primeira variável de ambiente definida (não vazia) da lista.
+env_primeira <- function(nomes, padrao = "") {
+    for (nome in nomes) {
+        valor <- Sys.getenv(nome, unset = "")
+        if (nzchar(valor)) return(valor)
+    }
+    padrao
 }
 
 conectar_banco <- function(distro) {
@@ -48,19 +66,19 @@ conectar_banco <- function(distro) {
 
     distro <- toupper(trimws(distro))
 
-    driver_class <- Sys.getenv(
-        distro_env(distro, "IRIS_DRIVER_CLASS"),
-        unset = Sys.getenv("IRIS_DRIVER_CLASS", unset = "com.intersystems.jdbc.IRISDriver")
+    driver_class <- env_primeira(
+        c(distro_env(distro, "IRIS_DRIVER_CLASS"), "IRIS_DRIVER_CLASS"),
+        padrao = "com.intersystems.jdbc.IRISDriver"
     )
 
-    jar_path <- Sys.getenv(
-        distro_env(distro, "IRIS_JAR_PATH"),
-        unset = Sys.getenv("IRIS_JAR_PATH", unset = "")
-    )
+    jar_path <- env_primeira(c(distro_env(distro, "IRIS_JAR_PATH"), "IRIS_JAR_PATH"))
 
-    url      <- Sys.getenv(distro_env(distro, "IRIS_URL"),      unset = "")
-    user     <- Sys.getenv(distro_env(distro, "IRIS_USER"),     unset = "")
-    password <- Sys.getenv(distro_env(distro, "IRIS_PASSWORD"), unset = "")
+    url  <- env_primeira(distro_env(distro, "IRIS_URL"))
+    user <- env_primeira(distro_env(distro, "IRIS_USER"))
+
+    # {DISTRO}_IRIS_PASS é o nome usado nos .Rmd originais — aceito como
+    # alternativa a {DISTRO}_IRIS_PASSWORD.
+    password <- env_primeira(c(distro_env(distro, "IRIS_PASSWORD"), distro_env(distro, "IRIS_PASS")))
 
     if (url == "" || user == "" || password == "") {
         stop(
@@ -85,42 +103,4 @@ conectar_banco <- function(distro) {
         user = user,
         password = password
     )
-}
-
-# -----------------------------------------------------
-# CONSULTA DA MATRÍCULA (movida do app.R)
-# -----------------------------------------------------
-# Usa parâmetro (?) em vez de interpolar o valor no SQL: o IRIS pode
-# reaproveitar o plano de execução e elimina qualquer risco de injeção.
-# -----------------------------------------------------
-SQL_CONSULTA_MATRICULA <- "
-SELECT TOP 1
-    Servidor->Nome AS NOME,
-    Servidor->Funcional->DataIngOrgaoFormatada AS DATAINICIO,
-    Servidor->Financeiro->DataDesligamento AS DATAFIM,
-    ProvDocumento_Tipo->Descricao AS PORTARIA_TIPO,
-    ProvDocumento_Numero AS PORTARIA_NUMERO,
-    TO_CHAR(ProvDocumento_DataDoc, 'DD/MM/YYYY') AS PORTARIA_DATA,
-    ProvDocumento_PublicacaoTipo->Descricao AS DIARIO_TIPO,
-    ProvDocumento_PublicacaoNumero AS DIARIO_NUMERO,
-    TO_CHAR(ProvDocumento_PublicacaoData, 'DD/MM/YYYY') AS DIARIO_DATA,
-    Servidor->Funcional->LotacaoExercicio->Descricao AS LOTACAO,
-    Servidor->Matricula AS MATRICULA,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Nome AS GESTOR_NOME,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Funcional->CargoFuncao->Descricao AS GESTOR_CARGO,
-    Servidor->Funcional->LotacaoExercicio->Gestor->Matricula AS GESTOR_MATRICULA
-FROM
-    RHCadCargoEfetivo
-WHERE
-    Servidor->MATRICULA = ?
-ORDER BY
-    ProvDocumento_DataDoc DESC
-"
-
-consultar_matricula <- function(matricula_num, distro) {
-
-    con_iris <- conectar_banco(distro)
-    on.exit(try(DBI::dbDisconnect(con_iris), silent = TRUE), add = TRUE)
-
-    DBI::dbGetQuery(con_iris, SQL_CONSULTA_MATRICULA, as.integer(matricula_num))
 }
