@@ -891,6 +891,7 @@ ui <- fluidPage(
                 padding-top: 14px;
                 gap: 12px;
                 z-index: 1050;
+                transition: width .2s ease;
             }
 
             .icon-bar .icon-btn {
@@ -924,9 +925,80 @@ ui <- fluidPage(
                 color: #fff;
             }
 
+            /* =============================================
+               ÍCONE MENU (expandir/recolher a barra lateral)
+               — maior que os demais e sempre no topo.
+               ============================================= */
+
+            .icon-bar .icon-btn-menu {
+                width: 44px;
+                height: 44px;
+                font-size: 20px;
+                margin-bottom: 4px;
+                border-bottom: 1px solid rgba(255,255,255,.15);
+                padding-bottom: 10px;
+            }
+
+            /* Nome de cada ícone — oculto com a barra recolhida, visível
+               com a barra expandida (.icon-bar.expandida). */
+
+            .icon-bar .icon-label {
+                display: none;
+                margin-left: 10px;
+                font-size: 13px;
+                white-space: nowrap;
+            }
+
+            .icon-bar.expandida {
+                width: 220px;
+                align-items: stretch;
+                padding-left: 8px;
+                padding-right: 8px;
+            }
+
+            .icon-bar.expandida .icon-btn {
+                width: 100%;
+                justify-content: flex-start;
+                padding: 0 8px;
+            }
+
+            .icon-bar.expandida .icon-btn-menu {
+                padding-left: 8px;
+            }
+
+            .icon-bar.expandida .icon-label {
+                display: inline;
+            }
+
+            /* Separador entre a navegação (abas) e as ações. */
+            .icon-bar .icon-sep {
+                width: 28px;
+                border-top: 1px solid rgba(255,255,255,.15);
+                margin: 2px auto;
+            }
+
+            .icon-bar.expandida .icon-sep {
+                width: 100%;
+            }
+
+            /* Botão da aba que está aberta (Certidão / Administração
+               TOTP) — ver handler JS marcar-menu-ativo. */
+            .icon-bar .icon-btn.ativo {
+                background: rgba(255,255,255,.18);
+                color: #fff;
+                box-shadow: inset 3px 0 0 #6ea8fe;
+            }
+
             #app-content {
                 margin-left: 52px;
                 padding: 20px 25px;
+                transition: margin-left .2s ease;
+            }
+
+            /* Com a barra expandida, o conteúdo é empurrado (não fica
+               coberto pela barra). */
+            .icon-bar.expandida ~ #app-content {
+                margin-left: 220px;
             }
 
             .header-container {
@@ -1076,6 +1148,31 @@ ui <- fluidPage(
 
             );
 
+            // Expande/recolhe a barra lateral (ícone Menu) sem recriar a UI.
+            Shiny.addCustomMessageHandler(
+                'toggle-icon-bar',
+                function(message) {
+                    var barra = document.querySelector('.icon-bar');
+                    if (!barra) return;
+                    barra.classList.toggle('expandida', !!message.expandida);
+                }
+            );
+
+            // Destaca, na barra lateral, o botão da aba aberta.
+            Shiny.addCustomMessageHandler(
+                'marcar-menu-ativo',
+                function(message) {
+                    document
+                        .querySelectorAll('.icon-bar .icon-btn[data-menu]')
+                        .forEach(function(el) {
+                            el.classList.toggle(
+                                'ativo',
+                                el.getAttribute('data-menu') === message.menu
+                            );
+                        });
+                }
+            );
+
         "))
 
     ),
@@ -1153,6 +1250,10 @@ server <- function(input, output, session) {
     # informações do usuário deve iniciar escondido (usuário usa o botão
     # "Mostrar/ocultar informações do usuário" para exibi-lo).
     header_oculto <- reactiveVal(TRUE)
+
+    # Barra lateral expandida (mostrando os nomes dos ícones) ou não — ver
+    # ícone "Menu" (toggle_icon_bar) e o handler JS "toggle-icon-bar".
+    iconBarExpandida <- reactiveVal(FALSE)
 
     # ===================================================
     # ABA SELECIONADA
@@ -1596,6 +1697,42 @@ server <- function(input, output, session) {
         # mod_totp_admin_server() e o comentário em resetarAdminTotp acima).
         resetarAdminTotp(resetarAdminTotp() + 1)
 
+        # A tela principal é recriada no próximo login com a barra
+        # recolhida — o estado precisa acompanhar, senão o primeiro clique
+        # no ícone Menu "não faz nada".
+        iconBarExpandida(FALSE)
+
+    }, ignoreInit = TRUE)
+
+    # ---------------------------------------------------------------------
+    # BARRA LATERAL — EXPANDIR/RECOLHER (client-side, não recria a UI)
+    # ---------------------------------------------------------------------
+
+    observeEvent(input$toggle_icon_bar, {
+
+        iconBarExpandida(!iconBarExpandida())
+
+        session$sendCustomMessage(
+            "toggle-icon-bar",
+            list(expandida = iconBarExpandida())
+        )
+
+    }, ignoreInit = TRUE)
+
+    # ---------------------------------------------------------------------
+    # BARRA LATERAL — NAVEGAÇÃO ENTRE AS ABAS
+    # ---------------------------------------------------------------------
+    # Os botões Certidão / Administração TOTP abrem a aba correspondente
+    # (as abas continuam visíveis no topo). A troca de aba — por qualquer
+    # um dos dois caminhos — destaca o botão certo (observeEvent(input$menu)).
+
+    observeEvent(input$ir_certidao, {
+        nav_select("menu", selected = "Certidão", session = session)
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$ir_admin_totp, {
+        req(podeAdministrar())
+        nav_select("menu", selected = "Administração TOTP", session = session)
     }, ignoreInit = TRUE)
 
     # ---------------------------------------------------------------------
@@ -1638,6 +1775,7 @@ server <- function(input, output, session) {
     observeEvent(input$menu, {
         req(input$menu)
         menuSelecionado(input$menu)
+        session$sendCustomMessage("marcar-menu-ativo", list(menu = input$menu))
     }, ignoreInit = TRUE)
 
     # ---------------------------------------------------------------------
@@ -1881,11 +2019,70 @@ server <- function(input, output, session) {
 
             div(
 
-                class = "icon-bar",
+                class = paste(
+                    "icon-bar",
+                    if (isolate(iconBarExpandida())) "expandida"
+                ),
+
+                # Maior que os demais e sempre no topo: expande/recolhe a
+                # barra, mostrando o nome de cada ícone.
+                actionLink(
+                    "toggle_icon_bar",
+                    tagList(
+                        icon("bars"),
+                        tags$span(class = "icon-label", "Menu")
+                    ),
+                    class = "icon-btn icon-btn-menu",
+                    title = "Expandir/recolher menu"
+                ),
+
+                # -----------------------------------------------
+                # NAVEGAÇÃO — uma entrada por aba existente.
+                # data-menu = valor da aba (destaque do botão ativo).
+                # -----------------------------------------------
+
+                actionLink(
+                    "ir_certidao",
+                    tagList(
+                        icon("file-signature"),
+                        tags$span(class = "icon-label", "Certidão")
+                    ),
+                    class = paste(
+                        "icon-btn",
+                        if (identical(isolate(menuSelecionado()), "Certidão")) "ativo"
+                    ),
+                    title = "Certidão",
+                    `data-menu` = "Certidão"
+                ),
+
+                if (podeAdministrar()) {
+                    actionLink(
+                        "ir_admin_totp",
+                        tagList(
+                            icon("user-shield"),
+                            tags$span(class = "icon-label", "Administração TOTP")
+                        ),
+                        class = paste(
+                            "icon-btn",
+                            if (identical(isolate(menuSelecionado()), "Administração TOTP")) "ativo"
+                        ),
+                        title = "Administração TOTP",
+                        `data-menu` = "Administração TOTP"
+                    )
+                },
+
+                div(class = "icon-sep"),
+
+                # -----------------------------------------------
+                # AÇÕES
+                # -----------------------------------------------
 
                 actionLink(
                     "toggle_header",
-                    icon("id-badge"),
+                    tagList(
+                        icon("id-badge"),
+                        tags$span(class = "icon-label", "Mostrar/ocultar informações")
+                    ),
                     class = "icon-btn",
                     title = "Mostrar/ocultar informações do usuário"
                 ),
@@ -1893,7 +2090,10 @@ server <- function(input, output, session) {
                 if (ehAdminSenhaMestra()) {
                     actionLink(
                         "trocar_empresa",
-                        icon("building"),
+                        tagList(
+                            icon("building"),
+                            tags$span(class = "icon-label", "Trocar empresa")
+                        ),
                         class = "icon-btn",
                         title = "Trocar empresa"
                     )
@@ -1901,14 +2101,20 @@ server <- function(input, output, session) {
 
                 actionLink(
                     "mostrar_readme",
-                    icon("circle-info"),
+                    tagList(
+                        icon("circle-info"),
+                        tags$span(class = "icon-label", "Ver instruções")
+                    ),
                     class = "icon-btn",
                     title = "Ver instruções (README)"
                 ),
 
                 actionLink(
                     "sair",
-                    icon("power-off"),
+                    tagList(
+                        icon("power-off"),
+                        tags$span(class = "icon-label", "Sair")
+                    ),
                     class = "icon-btn sair",
                     title = "Sair"
                 )
